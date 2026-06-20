@@ -1,0 +1,849 @@
+import AppKit
+import Foundation
+
+@MainActor
+final class FileBrowserViewModel: ObservableObject {
+    @Published private(set) var currentURL: URL
+    @Published var addressText: String
+    @Published private(set) var items: [FileItem] = []
+    @Published var selectedIDs: Set<URL> = []
+    @Published var showHiddenFiles = false {
+        didSet {
+            reload()
+        }
+    }
+    @Published private(set) var sortColumn: FileSortColumn = .name
+    @Published private(set) var sortAscending = true
+    @Published var errorMessage: String?
+    @Published var renameRequest: RenameRequest?
+    @Published private(set) var pendingClipboardOperation: FileClipboardOperation?
+    @Published private(set) var sidebarSections: [SidebarSection] = []
+    @Published var viewMode: BrowserViewMode = .list
+
+    private let fileManager = FileManager.default
+    private var history: [URL]
+    private var historyIndex = 0
+
+    private enum TerminalApp {
+        case terminal
+        case iTerm
+    }
+
+    private var iTermApplicationURL: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2")
+    }
+
+    init(startURL: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        let initialURL = startURL.standardizedFileURL
+        currentURL = initialURL
+        addressText = initialURL.path
+        history = [initialURL]
+        refreshSidebarLocations()
+        reload()
+    }
+
+    var canGoBack: Bool {
+        historyIndex > 0
+    }
+
+    var canGoForward: Bool {
+        historyIndex < history.count - 1
+    }
+
+    var canGoUp: Bool {
+        currentURL.path != "/"
+    }
+
+    var selectedItems: [FileItem] {
+        items.filter { selectedIDs.contains($0.url) }
+    }
+
+    var selectedURLs: [URL] {
+        selectedItems.map(\.url)
+    }
+
+    var isITermAvailable: Bool {
+        iTermApplicationURL != nil
+    }
+
+    var breadcrumbs: [Breadcrumb] {
+        var result: [Breadcrumb] = []
+        var path = ""
+
+        for component in currentURL.pathComponents {
+            if component == "/" {
+                path = "/"
+                result.append(Breadcrumb(title: "Mac", url: URL(fileURLWithPath: "/", isDirectory: true)))
+            } else {
+                path = (path as NSString).appendingPathComponent(component)
+                result.append(Breadcrumb(title: component, url: URL(fileURLWithPath: path, isDirectory: true)))
+            }
+        }
+
+        return result
+    }
+
+    func reload() {
+        refreshSidebarLocations()
+
+        let keys: [URLResourceKey] = [
+            .isDirectoryKey,
+            .isPackageKey,
+            .fileSizeKey,
+            .totalFileAllocatedSizeKey,
+            .contentModificationDateKey,
+            .localizedTypeDescriptionKey,
+            .isHiddenKey,
+            .localizedNameKey
+        ]
+
+        do {
+            let options: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
+            let urls = try fileManager.contentsOfDirectory(
+                at: currentURL,
+                includingPropertiesForKeys: keys,
+                options: options
+            )
+
+            let loadedItems = try urls.map(FileItem.load)
+            items = sortedItems(loadedItems)
+            selectedIDs = selectedIDs.filter { selectedURL in
+                items.contains { $0.url == selectedURL }
+            }
+        } catch {
+            items = []
+            selectedIDs.removeAll()
+            presentError(error, action: "Read folder")
+        }
+    }
+
+    func submitAddress() {
+        let rawPath = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !rawPath.isEmpty else {
+            addressText = currentURL.path
+            return
+        }
+
+        let expandedPath = (rawPath as NSString).expandingTildeInPath
+        let targetURL: URL
+
+        if expandedPath.hasPrefix("/") {
+            targetURL = URL(fileURLWithPath: expandedPath)
+        } else {
+            targetURL = currentURL.appendingPathComponent(expandedPath)
+        }
+
+        navigate(to: targetURL)
+    }
+
+    func navigate(to url: URL, recordHistory: Bool = true) {
+        let targetURL = url.standardizedFileURL
+        var isDirectory: ObjCBool = false
+
+        guard fileManager.fileExists(atPath: targetURL.path, isDirectory: &isDirectory) else {
+            addressText = currentURL.path
+            presentMessage("Path does not exist: \(targetURL.path)")
+            return
+        }
+
+        guard isDirectory.boolValue else {
+            NSWorkspace.shared.open(targetURL)
+            addressText = currentURL.path
+            return
+        }
+
+        currentURL = targetURL
+        addressText = targetURL.path
+        selectedIDs.removeAll()
+
+        if recordHistory {
+            if historyIndex < history.count - 1 {
+                history.removeSubrange((historyIndex + 1)..<history.count)
+            }
+
+            if history.last != targetURL {
+                history.append(targetURL)
+                historyIndex = history.count - 1
+            }
+        }
+
+        reload()
+    }
+
+    func goBack() {
+        guard canGoBack else {
+            return
+        }
+
+        historyIndex -= 1
+        navigate(to: history[historyIndex], recordHistory: false)
+    }
+
+    func goForward() {
+        guard canGoForward else {
+            return
+        }
+
+        historyIndex += 1
+        navigate(to: history[historyIndex], recordHistory: false)
+    }
+
+    func goUp() {
+        guard canGoUp else {
+            return
+        }
+
+        navigate(to: currentURL.deletingLastPathComponent())
+    }
+
+    func open(_ item: FileItem) {
+        if item.canNavigateInto {
+            navigate(to: item.url)
+        } else {
+            NSWorkspace.shared.open(item.url)
+        }
+    }
+
+    func openSelected() {
+        guard let item = selectedItems.first else {
+            return
+        }
+
+        open(item)
+    }
+
+    func sort(by column: FileSortColumn) {
+        if sortColumn == column {
+            sortAscending.toggle()
+        } else {
+            sortColumn = column
+            sortAscending = true
+        }
+
+        items = sortedItems(items)
+    }
+
+    func createFolder() {
+        let folderURL = uniqueURL(
+            in: currentURL,
+            baseName: "New Folder",
+            pathExtension: "",
+            copyStyle: false
+        )
+
+        do {
+            try fileManager.createDirectory(at: folderURL, withIntermediateDirectories: false)
+            reload()
+            selectedIDs = [folderURL]
+            renameRequest = RenameRequest(url: folderURL, currentName: folderURL.lastPathComponent)
+        } catch {
+            presentError(error, action: "Create folder")
+        }
+    }
+
+    func createFile() {
+        let fileURL = uniqueURL(
+            in: currentURL,
+            baseName: "New File",
+            pathExtension: "txt",
+            copyStyle: false
+        )
+
+        guard fileManager.createFile(atPath: fileURL.path, contents: Data()) else {
+            presentMessage("Create file failed: \(fileURL.path)")
+            return
+        }
+
+        reload()
+        selectedIDs = [fileURL]
+        renameRequest = RenameRequest(url: fileURL, currentName: fileURL.lastPathComponent)
+    }
+
+    func beginRename(_ item: FileItem) {
+        renameRequest = RenameRequest(url: item.url, currentName: item.displayName)
+    }
+
+    func beginRenameSelected() {
+        guard let item = selectedItems.first, selectedIDs.count == 1 else {
+            return
+        }
+
+        beginRename(item)
+    }
+
+    func cancelRename() {
+        renameRequest = nil
+    }
+
+    func rename(url: URL, to proposedName: String) {
+        let newName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !newName.isEmpty else {
+            presentMessage("Name cannot be empty.")
+            return
+        }
+
+        let destinationURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+
+        guard destinationURL != url else {
+            renameRequest = nil
+            return
+        }
+
+        guard !fileManager.fileExists(atPath: destinationURL.path) else {
+            presentMessage("An item named \"\(newName)\" already exists.")
+            return
+        }
+
+        do {
+            try fileManager.moveItem(at: url, to: destinationURL)
+            renameRequest = nil
+            reload()
+            selectedIDs = [destinationURL]
+        } catch {
+            presentError(error, action: "Rename")
+        }
+    }
+
+    func copySelection() {
+        let urls = selectedURLs
+
+        guard !urls.isEmpty else {
+            return
+        }
+
+        pendingClipboardOperation = FileClipboardOperation(mode: .copy, urls: urls)
+        writeURLsToPasteboard(urls)
+    }
+
+    func cutSelection() {
+        let urls = selectedURLs
+
+        guard !urls.isEmpty else {
+            return
+        }
+
+        pendingClipboardOperation = FileClipboardOperation(mode: .cut, urls: urls)
+        writeURLsToPasteboard(urls)
+    }
+
+    func pasteIntoCurrentFolder() {
+        paste(into: currentURL)
+    }
+
+    func paste(into destinationFolder: URL) {
+        let operation = pendingClipboardOperation
+            ?? FileClipboardOperation(mode: .copy, urls: readFileURLsFromPasteboard())
+
+        guard !operation.urls.isEmpty else {
+            return
+        }
+
+        do {
+            var pastedURLs: [URL] = []
+
+            for sourceURL in operation.urls {
+                let destinationURL = uniqueDestinationURL(for: sourceURL, in: destinationFolder)
+
+                if operation.mode == .cut {
+                    if sourceURL == destinationURL {
+                        continue
+                    }
+
+                    try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                } else {
+                    try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                }
+
+                pastedURLs.append(destinationURL)
+            }
+
+            if operation.mode == .cut {
+                pendingClipboardOperation = nil
+            }
+
+            reload()
+            selectedIDs = Set(pastedURLs)
+        } catch {
+            presentError(error, action: operation.mode == .cut ? "Move" : "Copy")
+        }
+    }
+
+    func duplicate(_ item: FileItem) {
+        do {
+            let destinationURL = uniqueDestinationURL(for: item.url, in: item.url.deletingLastPathComponent())
+            try fileManager.copyItem(at: item.url, to: destinationURL)
+            reload()
+            selectedIDs = [destinationURL]
+        } catch {
+            presentError(error, action: "Duplicate")
+        }
+    }
+
+    func trashSelection() {
+        let urls = selectedURLs
+
+        guard !urls.isEmpty else {
+            return
+        }
+
+        do {
+            for url in urls {
+                var resultingURL: NSURL?
+                try fileManager.trashItem(at: url, resultingItemURL: &resultingURL)
+            }
+
+            reload()
+        } catch {
+            presentError(error, action: "Move to Trash")
+        }
+    }
+
+    func copyPath(_ item: FileItem) {
+        copyPath(item.url)
+    }
+
+    func copyPath(_ url: URL) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(url.path, forType: .string)
+    }
+
+    func revealInFinder(_ item: FileItem) {
+        revealInFinder(item.url)
+    }
+
+    func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func openInTerminal(_ url: URL) {
+        openDirectory(url, in: .terminal)
+    }
+
+    func openIniTerm(_ url: URL) {
+        openDirectory(url, in: .iTerm)
+    }
+
+    func refreshSidebarLocations() {
+        sidebarSections = Self.makeSidebarSections()
+    }
+
+    func connectToServer(_ address: String) {
+        let trimmedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedAddress.isEmpty else {
+            return
+        }
+
+        let normalizedAddress: String
+
+        if trimmedAddress.contains("://") {
+            normalizedAddress = trimmedAddress
+        } else {
+            normalizedAddress = "smb://\(trimmedAddress)"
+        }
+
+        guard let url = URL(string: normalizedAddress) else {
+            presentMessage("Invalid server address: \(trimmedAddress)")
+            return
+        }
+
+        if NSWorkspace.shared.open(url) {
+            refreshSidebarLocations()
+        } else {
+            presentMessage("Could not open server address: \(normalizedAddress)")
+        }
+    }
+
+    func clearError() {
+        errorMessage = nil
+    }
+
+    private static func makeSidebarSections() -> [SidebarSection] {
+        let fileManager = FileManager.default
+        let homeURL = fileManager.homeDirectoryForCurrentUser
+        let favorites = [
+            SidebarLocation(title: "Home", systemImageName: "house", url: homeURL),
+            SidebarLocation(title: "Desktop", systemImageName: "desktopcomputer", url: homeURL.appendingPathComponent("Desktop")),
+            SidebarLocation(title: "Documents", systemImageName: "doc.text", url: homeURL.appendingPathComponent("Documents")),
+            SidebarLocation(title: "Downloads", systemImageName: "arrow.down.circle", url: homeURL.appendingPathComponent("Downloads")),
+            SidebarLocation(title: "Applications", systemImageName: "app", url: URL(fileURLWithPath: "/Applications", isDirectory: true))
+        ].filter { fileManager.fileExists(atPath: $0.url.path) }
+
+        let locations = deduplicatedLocations(
+            cloudStorageLocations(homeURL: homeURL)
+                + mountedVolumeLocations()
+                + [SidebarLocation(title: "Mac", systemImageName: "internaldrive", url: URL(fileURLWithPath: "/", isDirectory: true))]
+        )
+
+        return [
+            SidebarSection(title: "Favorites", locations: favorites),
+            SidebarSection(title: "Locations", locations: locations)
+        ].filter { !$0.locations.isEmpty }
+    }
+
+    private static func cloudStorageLocations(homeURL: URL) -> [SidebarLocation] {
+        let fileManager = FileManager.default
+        var urls: [URL] = []
+
+        let cloudStorageURL = homeURL
+            .appendingPathComponent("Library")
+            .appendingPathComponent("CloudStorage")
+
+        if let cloudStorageContents = try? fileManager.contentsOfDirectory(
+            at: cloudStorageURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .localizedNameKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            urls.append(contentsOf: cloudStorageContents.filter { isDirectory($0, fileManager: fileManager) })
+        }
+
+        if let homeContents = try? fileManager.contentsOfDirectory(
+            at: homeURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .localizedNameKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            urls.append(
+                contentsOf: homeContents.filter { url in
+                    let name = url.lastPathComponent.lowercased()
+                    return isDirectory(url, fileManager: fileManager)
+                        && (name.hasPrefix("google drive") || name.hasPrefix("googledrive") || name.hasPrefix("onedrive"))
+                }
+            )
+        }
+
+        return deduplicatedLocations(urls.map { url in
+            SidebarLocation(
+                title: cloudStorageTitle(for: url),
+                systemImageName: cloudStorageIconName(for: url),
+                url: url
+            )
+        })
+    }
+
+    private static func mountedVolumeLocations() -> [SidebarLocation] {
+        let keys: [URLResourceKey] = [
+            .volumeNameKey,
+            .volumeIsLocalKey,
+            .volumeIsInternalKey,
+            .volumeIsRemovableKey
+        ]
+
+        let volumeURLs = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: keys,
+            options: [.skipHiddenVolumes]
+        ) ?? []
+
+        let locations = volumeURLs.compactMap { url -> SidebarLocation? in
+            guard url.path != "/" else {
+                return nil
+            }
+
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            let title = values?.volumeName ?? FileManager.default.displayName(atPath: url.path)
+            let isLocal = values?.volumeIsLocal ?? true
+            let isInternal = values?.volumeIsInternal ?? false
+            let isRemovable = values?.volumeIsRemovable ?? false
+            let iconName: String
+
+            if !isLocal {
+                iconName = "network"
+            } else if isRemovable {
+                iconName = "externaldrive"
+            } else if isInternal {
+                iconName = "internaldrive"
+            } else {
+                iconName = "externaldrive.connected.to.line.below"
+            }
+
+            return SidebarLocation(title: title, systemImageName: iconName, url: url)
+        }
+
+        return deduplicatedLocations(locations)
+    }
+
+    private static func cloudStorageTitle(for url: URL) -> String {
+        let rawName = url.lastPathComponent
+        let lowercasedName = rawName.lowercased()
+
+        if lowercasedName.hasPrefix("googledrive") || lowercasedName.hasPrefix("google drive") {
+            return cleanedCloudName(rawName, provider: "Google Drive")
+        }
+
+        if lowercasedName.hasPrefix("onedrive") {
+            return cleanedCloudName(rawName, provider: "OneDrive")
+        }
+
+        if lowercasedName.contains("sharepoint") {
+            return cleanedCloudName(rawName, provider: "SharePoint")
+        }
+
+        return rawName.replacingOccurrences(of: "-", with: " ")
+    }
+
+    private static func cleanedCloudName(_ rawName: String, provider: String) -> String {
+        let separators = ["-", " "]
+
+        for separator in separators {
+            let prefix = "\(provider.replacingOccurrences(of: " ", with: ""))\(separator)"
+
+            if rawName.hasPrefix(prefix) {
+                return "\(provider) - \(rawName.dropFirst(prefix.count))"
+            }
+        }
+
+        if rawName == provider || rawName == provider.replacingOccurrences(of: " ", with: "") {
+            return provider
+        }
+
+        return rawName.replacingOccurrences(of: "-", with: " ")
+    }
+
+    private static func cloudStorageIconName(for url: URL) -> String {
+        let name = url.lastPathComponent.lowercased()
+
+        if name.contains("sharepoint") {
+            return "building.2"
+        }
+
+        if name.contains("onedrive") || name.contains("google") {
+            return "cloud"
+        }
+
+        return "externaldrive.badge.icloud"
+    }
+
+    private static func isDirectory(_ url: URL, fileManager: FileManager) -> Bool {
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    private static func deduplicatedLocations(_ locations: [SidebarLocation]) -> [SidebarLocation] {
+        var seenPaths: Set<String> = []
+        var result: [SidebarLocation] = []
+
+        for location in locations {
+            let path = location.url.standardizedFileURL.path
+
+            if seenPaths.insert(path).inserted {
+                result.append(location)
+            }
+        }
+
+        return result.sorted {
+            if $0.title == "Mac" {
+                return false
+            }
+
+            if $1.title == "Mac" {
+                return true
+            }
+
+            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    private func sortedItems(_ values: [FileItem]) -> [FileItem] {
+        values.sorted { left, right in
+            if left.isDirectory != right.isDirectory {
+                return left.isDirectory
+            }
+
+            let comparison: ComparisonResult
+
+            switch sortColumn {
+            case .name:
+                comparison = left.displayName.localizedStandardCompare(right.displayName)
+            case .modifiedAt:
+                let leftDate = left.modifiedAt ?? .distantPast
+                let rightDate = right.modifiedAt ?? .distantPast
+                comparison = compare(leftDate, rightDate)
+            case .size:
+                comparison = compare(left.size ?? -1, right.size ?? -1)
+            case .kind:
+                comparison = left.kind.localizedStandardCompare(right.kind)
+            }
+
+            if comparison == .orderedSame {
+                return left.displayName.localizedStandardCompare(right.displayName) == .orderedAscending
+            }
+
+            return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
+        }
+    }
+
+    private func compare<T: Comparable>(_ left: T, _ right: T) -> ComparisonResult {
+        if left < right {
+            return .orderedAscending
+        }
+
+        if left > right {
+            return .orderedDescending
+        }
+
+        return .orderedSame
+    }
+
+    private func uniqueDestinationURL(for sourceURL: URL, in destinationFolder: URL) -> URL {
+        let filename = sourceURL.lastPathComponent
+        let pathExtension = sourceURL.pathExtension
+        let baseName: String
+
+        if pathExtension.isEmpty {
+            baseName = filename
+        } else {
+            baseName = (filename as NSString).deletingPathExtension
+        }
+
+        return uniqueURL(
+            in: destinationFolder,
+            baseName: baseName,
+            pathExtension: pathExtension,
+            copyStyle: true
+        )
+    }
+
+    private func uniqueURL(
+        in folder: URL,
+        baseName: String,
+        pathExtension: String,
+        copyStyle: Bool
+    ) -> URL {
+        func makeURL(name: String) -> URL {
+            if pathExtension.isEmpty {
+                return folder.appendingPathComponent(name)
+            }
+
+            return folder.appendingPathComponent(name).appendingPathExtension(pathExtension)
+        }
+
+        let firstURL = makeURL(name: baseName)
+
+        guard fileManager.fileExists(atPath: firstURL.path) else {
+            return firstURL
+        }
+
+        var index = 2
+
+        while true {
+            let suffix: String
+
+            if copyStyle {
+                suffix = index == 2 ? " copy" : " copy \(index)"
+            } else {
+                suffix = " \(index)"
+            }
+
+            let candidateURL = makeURL(name: "\(baseName)\(suffix)")
+
+            if !fileManager.fileExists(atPath: candidateURL.path) {
+                return candidateURL
+            }
+
+            index += 1
+        }
+    }
+
+    private func writeURLsToPasteboard(_ urls: [URL]) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls.map { $0 as NSURL })
+        pasteboard.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
+    }
+
+    private func readFileURLsFromPasteboard() -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+
+        let objects = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: options
+        ) as? [NSURL]
+
+        return objects?.compactMap { $0 as URL } ?? []
+    }
+
+    private func openDirectory(_ url: URL, in terminalApp: TerminalApp) {
+        let directoryURL = directoryURL(for: url)
+        let command = "cd \(shellQuoted(directoryURL.path))"
+        let escapedCommand = appleScriptEscaped(command)
+
+        switch terminalApp {
+        case .terminal:
+            runAppleScript(
+                """
+                tell application "Terminal"
+                    activate
+                    do script "\(escapedCommand)"
+                end tell
+                """,
+                action: "Open in Terminal"
+            )
+        case .iTerm:
+            guard isITermAvailable else {
+                presentMessage("iTerm is not installed.")
+                return
+            }
+
+            runAppleScript(
+                """
+                tell application "iTerm"
+                    activate
+                    create window with default profile
+                    tell current session of current window
+                        write text "\(escapedCommand)"
+                    end tell
+                end tell
+                """,
+                action: "Open in iTerm"
+            )
+        }
+    }
+
+    private func directoryURL(for url: URL) -> URL {
+        var isDirectory: ObjCBool = false
+
+        if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return url
+        }
+
+        return url.deletingLastPathComponent()
+    }
+
+    private func runAppleScript(_ source: String, action: String) {
+        guard let script = NSAppleScript(source: source) else {
+            presentMessage("\(action) failed: could not build AppleScript.")
+            return
+        }
+
+        var errorInfo: NSDictionary?
+        script.executeAndReturnError(&errorInfo)
+
+        if let errorInfo {
+            let message = errorInfo["NSAppleScriptErrorMessage"] as? String
+                ?? errorInfo.description
+            presentMessage("\(action) failed: \(message)")
+        }
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private func appleScriptEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private func presentError(_ error: Error, action: String) {
+        errorMessage = "\(action) failed: \(error.localizedDescription)"
+    }
+
+    private func presentMessage(_ message: String) {
+        errorMessage = message
+    }
+}
