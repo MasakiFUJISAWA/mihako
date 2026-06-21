@@ -592,17 +592,37 @@ final class FileBrowserViewModel: ObservableObject {
             }
 
             acceptedDrop = true
-            provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { [weak self] item, error in
-                let droppedURL = Self.url(fromDroppedItem: item)
-                let errorMessage = error?.localizedDescription
-
-                Task { @MainActor in
-                    self?.dropItem(droppedURL, errorMessage: errorMessage, into: destinationFolder)
-                }
-            }
+            loadDroppedURL(from: provider, typeIdentifier: typeIdentifier, into: destinationFolder)
         }
 
         return acceptedDrop
+    }
+
+    private func loadDroppedURL(
+        from provider: NSItemProvider,
+        typeIdentifier: String,
+        into destinationFolder: URL
+    ) {
+        guard typeIdentifier == UTType.fileURL.identifier else {
+            provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { [weak self] data, error in
+                let droppedURL = data
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                    .flatMap(Self.url(fromDroppedString:))
+
+                Task { @MainActor in
+                    self?.dropItem(droppedURL, errorMessage: droppedURL == nil ? error?.localizedDescription : nil, into: destinationFolder)
+                }
+            }
+            return
+        }
+
+        provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { [weak self] item, itemError in
+            let droppedURL = Self.url(fromDroppedItem: item)
+
+            Task { @MainActor in
+                self?.dropItem(droppedURL, errorMessage: droppedURL == nil ? itemError?.localizedDescription : nil, into: destinationFolder)
+            }
+        }
     }
 
     func sort(by column: FileSortColumn) {

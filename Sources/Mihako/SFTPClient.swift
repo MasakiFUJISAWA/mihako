@@ -82,14 +82,7 @@ enum SFTPClient {
         let spec = try connectionSpec(for: url)
 
         guard let path = spec.path, !path.isEmpty else {
-            let result = try await runSSH(spec: spec, command: "pwd -P")
-            let remotePath = result.outputString.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            guard !remotePath.isEmpty else {
-                throw SFTPClientError.commandFailed("Could not resolve remote home directory.")
-            }
-
-            return Self.url(bySettingPath: remotePath, on: url)
+            return Self.url(bySettingPath: "/", on: url)
         }
 
         return Self.url(bySettingPath: path, on: url)
