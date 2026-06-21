@@ -212,6 +212,7 @@ struct SidebarResizeHandle: View {
 struct SidebarView: View {
     @EnvironmentObject private var browser: FileBrowserViewModel
     @State private var isFavoritesDropTargeted = false
+    @State private var draggedLocationID: String?
 
     var body: some View {
         ScrollView {
@@ -220,7 +221,9 @@ struct SidebarView: View {
                     SidebarLocationsSection(
                         section: section,
                         acceptsFavoriteDrops: section.title == "Favorites",
-                        isDropTargeted: section.title == "Favorites" ? $isFavoritesDropTargeted : .constant(false)
+                        isDropTargeted: section.title == "Favorites" ? $isFavoritesDropTargeted : .constant(false),
+                        allowsLocationReordering: section.title == "Locations",
+                        draggedLocationID: $draggedLocationID
                     )
                 }
 
@@ -239,6 +242,8 @@ struct SidebarLocationsSection: View {
     let section: SidebarSection
     let acceptsFavoriteDrops: Bool
     @Binding var isDropTargeted: Bool
+    let allowsLocationReordering: Bool
+    @Binding var draggedLocationID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -265,6 +270,26 @@ struct SidebarLocationsSection: View {
                             isTargeted: $isDropTargeted
                         )
                     )
+                    .modifier(
+                        LocationReorderModifier(
+                            isEnabled: allowsLocationReordering,
+                            location: location,
+                            draggedLocationID: $draggedLocationID
+                        )
+                    )
+            }
+
+            if allowsLocationReordering {
+                Color.clear
+                    .frame(height: 10)
+                    .contentShape(Rectangle())
+                    .onDrop(
+                        of: [UTType.plainText.identifier],
+                        delegate: LocationReorderEndDropDelegate(
+                            browser: browser,
+                            draggedLocationID: $draggedLocationID
+                        )
+                    )
             }
         }
         .padding(.bottom, 4)
@@ -280,6 +305,93 @@ struct SidebarLocationsSection: View {
                 isTargeted: $isDropTargeted
             )
         )
+    }
+}
+
+struct LocationReorderModifier: ViewModifier {
+    let isEnabled: Bool
+    let location: SidebarLocation
+    @Binding var draggedLocationID: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .onDrag {
+                    draggedLocationID = location.id
+                    return NSItemProvider(object: location.id as NSString)
+                }
+                .onDrop(
+                    of: [UTType.plainText.identifier],
+                    delegate: LocationReorderDropDelegate(
+                        browser: browser,
+                        location: location,
+                        draggedLocationID: $draggedLocationID
+                    )
+                )
+        } else {
+            content
+        }
+    }
+
+    @EnvironmentObject private var browser: FileBrowserViewModel
+}
+
+struct LocationReorderDropDelegate: DropDelegate {
+    let browser: FileBrowserViewModel
+    let location: SidebarLocation
+    @Binding var draggedLocationID: String?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedLocationID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let sourceID = draggedLocationID,
+              sourceID != location.id else {
+            return
+        }
+
+        browser.moveSidebarLocation(sourceID: sourceID, over: location.id)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedLocationID = nil
+        return true
+    }
+}
+
+struct LocationReorderEndDropDelegate: DropDelegate {
+    let browser: FileBrowserViewModel
+    @Binding var draggedLocationID: String?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedLocationID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let sourceID = draggedLocationID else {
+            return
+        }
+
+        browser.moveSidebarLocationToEnd(sourceID: sourceID)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        if let sourceID = draggedLocationID {
+            browser.moveSidebarLocationToEnd(sourceID: sourceID)
+        }
+
+        draggedLocationID = nil
+        return true
     }
 }
 

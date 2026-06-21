@@ -33,10 +33,12 @@ final class FileBrowserViewModel: ObservableObject {
     private let legacyUserFavoritesDefaultsKey = "My" + "Finder.userFavoriteFolders"
     private let serverConnectionsDefaultsKey = "Mihako.serverConnections"
     private let legacyServerConnectionsDefaultsKey = "My" + "Finder.serverConnections"
+    private let sidebarLocationOrderDefaultsKey = "Mihako.sidebarLocationOrder"
     private var history: [URL]
     private var historyIndex = 0
     private var selectionAnchorURL: URL?
     private var reconnectingServerIDs: Set<String> = []
+    private var sidebarLocationOrderIDs: [String] = []
 
     private enum TerminalApp {
         case terminal
@@ -88,6 +90,7 @@ final class FileBrowserViewModel: ObservableObject {
             defaultsKey: serverConnectionsDefaultsKey,
             legacyDefaultsKey: legacyServerConnectionsDefaultsKey
         )
+        sidebarLocationOrderIDs = Self.loadSidebarLocationOrder(defaultsKey: sidebarLocationOrderDefaultsKey)
         refreshSidebarLocations()
         reload()
         reconnectSavedServers()
@@ -761,7 +764,8 @@ final class FileBrowserViewModel: ObservableObject {
     func refreshSidebarLocations() {
         sidebarSections = Self.makeSidebarSections(
             userFavoriteFolders: userFavoriteFolders,
-            serverConnections: serverConnections
+            serverConnections: serverConnections,
+            locationOrderIDs: sidebarLocationOrderIDs
         )
     }
 
@@ -789,6 +793,42 @@ final class FileBrowserViewModel: ObservableObject {
         isConnectServerDialogPresented = false
     }
 
+    func moveSidebarLocation(sourceID: String, over targetID: String) {
+        guard sourceID != targetID,
+              let currentIDs = currentLocationIDs(),
+              let sourceIndex = currentIDs.firstIndex(of: sourceID),
+              let targetIndex = currentIDs.firstIndex(of: targetID) else {
+            return
+        }
+
+        var nextIDs = currentIDs
+        let movedID = nextIDs.remove(at: sourceIndex)
+
+        guard let adjustedTargetIndex = nextIDs.firstIndex(of: targetID) else {
+            return
+        }
+
+        let insertionIndex = sourceIndex < targetIndex
+            ? min(adjustedTargetIndex + 1, nextIDs.count)
+            : adjustedTargetIndex
+
+        nextIDs.insert(movedID, at: insertionIndex)
+        persistSidebarLocationOrder(nextIDs)
+    }
+
+    func moveSidebarLocationToEnd(sourceID: String) {
+        guard let currentIDs = currentLocationIDs(),
+              currentIDs.contains(sourceID),
+              currentIDs.last != sourceID else {
+            return
+        }
+
+        var nextIDs = currentIDs
+        nextIDs.removeAll { $0 == sourceID }
+        nextIDs.append(sourceID)
+        persistSidebarLocationOrder(nextIDs)
+    }
+
     func connectToServer(kind selectedKind: RemoteConnectionKind, address: String, displayName: String?) {
         let trimmedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -813,7 +853,8 @@ final class FileBrowserViewModel: ObservableObject {
 
     private static func makeSidebarSections(
         userFavoriteFolders: [URL],
-        serverConnections: [ServerConnection]
+        serverConnections: [ServerConnection],
+        locationOrderIDs: [String]
     ) -> [SidebarSection] {
         let fileManager = FileManager.default
         let homeURL = fileManager.homeDirectoryForCurrentUser
@@ -840,7 +881,8 @@ final class FileBrowserViewModel: ObservableObject {
 
         let locations = finderStyleLocations(
             homeURL: homeURL,
-            serverConnections: serverConnections
+            serverConnections: serverConnections,
+            locationOrderIDs: locationOrderIDs
         )
 
         return [
@@ -863,14 +905,17 @@ final class FileBrowserViewModel: ObservableObject {
 
     private static func finderStyleLocations(
         homeURL: URL,
-        serverConnections: [ServerConnection]
+        serverConnections: [ServerConnection],
+        locationOrderIDs: [String]
     ) -> [SidebarLocation] {
-        deduplicatedPreservingOrder(
+        let locations = deduplicatedPreservingOrder(
             computerLocations()
                 + connectedServerLocations(serverConnections)
                 + mountedVolumeLocations()
                 + cloudStorageLocations(homeURL: homeURL)
         )
+
+        return orderedLocations(locations, orderIDs: locationOrderIDs)
     }
 
     private static func connectedServerLocations(_ connections: [ServerConnection]) -> [SidebarLocation] {
@@ -1461,6 +1506,39 @@ final class FileBrowserViewModel: ObservableObject {
         return connections
     }
 
+    private static func loadSidebarLocationOrder(defaultsKey: String) -> [String] {
+        UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+    }
+
+    private static func orderedLocations(
+        _ locations: [SidebarLocation],
+        orderIDs: [String]
+    ) -> [SidebarLocation] {
+        guard !orderIDs.isEmpty else {
+            return locations
+        }
+
+        let rankByID = Dictionary(uniqueKeysWithValues: orderIDs.enumerated().map { ($0.element, $0.offset) })
+
+        return locations.enumerated()
+            .sorted { left, right in
+                let leftRank = rankByID[left.element.id]
+                let rightRank = rankByID[right.element.id]
+
+                switch (leftRank, rightRank) {
+                case let (.some(leftRank), .some(rightRank)):
+                    return leftRank < rightRank
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                case (.none, .none):
+                    return left.offset < right.offset
+                }
+            }
+            .map(\.element)
+    }
+
     private static func deduplicatedPreservingOrder(_ locations: [SidebarLocation]) -> [SidebarLocation] {
         var seenPaths: Set<String> = []
         var result: [SidebarLocation] = []
@@ -1658,6 +1736,19 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         UserDefaults.standard.set(data, forKey: serverConnectionsDefaultsKey)
+    }
+
+    private func currentLocationIDs() -> [String]? {
+        sidebarSections
+            .first { $0.title == "Locations" }?
+            .locations
+            .map(\.id)
+    }
+
+    private func persistSidebarLocationOrder(_ ids: [String]) {
+        sidebarLocationOrderIDs = ids
+        UserDefaults.standard.set(ids, forKey: sidebarLocationOrderDefaultsKey)
+        refreshSidebarLocations()
     }
 
     private nonisolated static func filePath(fromDroppedItem item: NSSecureCoding?) -> String? {
