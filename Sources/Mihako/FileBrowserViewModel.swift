@@ -548,6 +548,13 @@ final class FileBrowserViewModel: ObservableObject {
                 completion(itemURLString.data(using: .utf8), nil)
                 return nil
             }
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.url.identifier,
+                visibility: .all
+            ) { completion in
+                completion(itemURLString.data(using: .utf8), nil)
+                return nil
+            }
         } else {
             provider = NSItemProvider(object: item.url as NSURL)
         }
