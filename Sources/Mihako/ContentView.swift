@@ -80,7 +80,7 @@ struct ContentView: View {
             )
         }
         .alert(
-            "Action Failed",
+            L10n.string("Action Failed"),
             isPresented: Binding(
                 get: { browser.errorMessage != nil },
                 set: { isPresented in
@@ -90,7 +90,7 @@ struct ContentView: View {
                 }
             )
         ) {
-            Button("OK") {
+            Button(L10n.string("OK")) {
                 browser.clearError()
             }
         } message: {
@@ -242,8 +242,8 @@ struct SidebarResizeHandle: View {
                 isCursorPushed = false
             }
         }
-        .help("Resize sidebar")
-        .accessibilityLabel("Resize sidebar")
+        .help(L10n.string("Resize sidebar"))
+        .accessibilityLabel(L10n.string("Resize sidebar"))
     }
 }
 
@@ -285,7 +285,7 @@ struct SidebarLocationsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(section.title)
+            Text(L10n.string(section.title))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(isDropTargeted ? Color.accentColor : .secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -459,7 +459,7 @@ struct SidebarNetworkSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text("Network")
+            Text(L10n.string("Network"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -470,7 +470,7 @@ struct SidebarNetworkSection: View {
             Button {
                 browser.promptConnectToServer()
             } label: {
-                Label("Connect...", systemImage: "network")
+                Label(L10n.string("Connect..."), systemImage: "network")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
@@ -481,14 +481,14 @@ struct SidebarNetworkSection: View {
             Button {
                 browser.reloadLocations()
             } label: {
-                Label("Reload Locations", systemImage: "arrow.clockwise")
+                Label(L10n.string("Reload Locations"), systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
-            .help("Rescan cloud folders, mounted drives, and network volumes")
+            .help(L10n.string("Rescan cloud folders, mounted drives, and network volumes"))
         }
         .padding(.bottom, 4)
     }
@@ -503,9 +503,13 @@ struct SidebarLocationRow: View {
         Button {
             browser.open(location)
         } label: {
-            Label(location.title, systemImage: location.systemImageName)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            Label {
+                Text(L10n.string(location.title))
+            } icon: {
+                Image(systemName: location.systemImageName)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
@@ -540,14 +544,14 @@ struct BrowserToolbarView: View {
                 browser.reload()
             }
 
-            TextField("Path", text: $browser.addressText)
+            TextField(L10n.string("Path"), text: $browser.addressText)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: NSFont.systemFontSize, design: .monospaced))
                 .lineLimit(1)
                 .onSubmit {
                     browser.submitAddress()
                 }
-                .help("Path")
+                .help(L10n.string("Path"))
                 .frame(maxWidth: .infinity)
                 .frame(height: 24)
                 .layoutPriority(1)
@@ -557,13 +561,13 @@ struct BrowserToolbarView: View {
             } label: {
                 Image(systemName: "arrow.right.circle")
             }
-            .help("Go")
+            .help(L10n.string("Go"))
 
             Toggle(isOn: $browser.showHiddenFiles) {
                 Image(systemName: browser.showHiddenFiles ? "eye" : "eye.slash")
             }
             .toggleStyle(.button)
-            .help("Show hidden files")
+            .help(L10n.string("Show hidden files"))
 
             ToolbarIconButton(systemImageName: "folder.badge.plus", help: "New Folder") {
                 browser.createFolder()
@@ -586,7 +590,7 @@ struct ToolbarIconButton: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)
-        .help(help)
+        .help(L10n.string(help))
     }
 }
 
@@ -630,7 +634,7 @@ struct FileActionBarView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Picker("View", selection: $browser.viewMode) {
+            Picker(L10n.string("View"), selection: $browser.viewMode) {
                 Image(systemName: "list.bullet")
                     .tag(BrowserViewMode.list)
 
@@ -640,7 +644,7 @@ struct FileActionBarView: View {
             .labelsHidden()
             .pickerStyle(.segmented)
             .frame(width: 92)
-            .help("View mode")
+            .help(L10n.string("View mode"))
 
             Divider()
                 .frame(height: 22)
@@ -719,7 +723,7 @@ struct FileListView: View {
 
             if browser.items.isEmpty {
                 Spacer()
-                Text("Empty Folder")
+                Text(L10n.string("Empty Folder"))
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
@@ -931,7 +935,7 @@ struct HeaderCell: View {
             browser.sort(by: column)
         } label: {
             HStack(spacing: 4) {
-                Text(title)
+                Text(L10n.string(title))
 
                 if browser.sortColumn == column {
                     Image(systemName: browser.sortAscending ? "chevron.up" : "chevron.down")
@@ -968,7 +972,7 @@ struct FileRow: View {
                 .lineLimit(1)
                 .frame(width: 110, alignment: .trailing)
 
-            Text(item.kind)
+            Text(L10n.string(item.kind))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -986,61 +990,61 @@ struct FileContextMenu: View {
     let item: FileItem
 
     var body: some View {
-        Button("Open") {
+        Button(L10n.string("Open")) {
             browser.open(item)
         }
 
         Divider()
 
-        Button("Rename") {
+        Button(L10n.string("Rename")) {
             browser.beginRename(item)
         }
 
-        Button("Duplicate") {
+        Button(L10n.string("Duplicate")) {
             browser.duplicate(item)
         }
 
         Divider()
 
-        Button("Copy") {
+        Button(L10n.string("Copy")) {
             browser.selectOnly(item.url)
             browser.copySelection()
         }
 
-        Button("Cut") {
+        Button(L10n.string("Cut")) {
             browser.selectOnly(item.url)
             browser.cutSelection()
         }
 
-        Button("Paste Into Folder") {
+        Button(L10n.string("Paste Into Folder")) {
             browser.paste(into: item.url)
         }
         .disabled(!item.canNavigateInto)
 
         Divider()
 
-        Button("Copy Path") {
+        Button(L10n.string("Copy Path")) {
             browser.copyPath(item)
         }
 
-        Button("Reveal in Finder") {
+        Button(L10n.string("Reveal in Finder")) {
             browser.revealInFinder(item)
         }
         .disabled(SFTPClient.isSFTPURL(item.url) || S3Client.isS3URL(item.url))
 
-        Button("Open in Terminal") {
+        Button(L10n.string("Open in Terminal")) {
             browser.openInTerminal(item.url)
         }
         .disabled(S3Client.isS3URL(item.url))
 
-        Button("Open in iTerm") {
+        Button(L10n.string("Open in iTerm")) {
             browser.openIniTerm(item.url)
         }
         .disabled(!browser.isITermAvailable || S3Client.isS3URL(item.url))
 
         Divider()
 
-        Button("Move to Trash") {
+        Button(L10n.string("Move to Trash")) {
             browser.selectOnly(item.url)
             browser.trashSelection()
         }
@@ -1051,39 +1055,39 @@ struct FolderContextMenu: View {
     @EnvironmentObject private var browser: FileBrowserViewModel
 
     var body: some View {
-        Button("New Folder") {
+        Button(L10n.string("New Folder")) {
             browser.createFolder()
         }
 
-        Button("New File") {
+        Button(L10n.string("New File")) {
             browser.createFile()
         }
 
         Divider()
 
-        Button("Paste") {
+        Button(L10n.string("Paste")) {
             browser.pasteIntoCurrentFolder()
         }
 
         Divider()
 
-        Button("Open in Terminal") {
+        Button(L10n.string("Open in Terminal")) {
             browser.openInTerminal(browser.currentURL)
         }
         .disabled(browser.isCurrentS3)
 
-        Button("Open in iTerm") {
+        Button(L10n.string("Open in iTerm")) {
             browser.openIniTerm(browser.currentURL)
         }
         .disabled(!browser.isITermAvailable || browser.isCurrentS3)
 
         Divider()
 
-        Button("Copy Path") {
+        Button(L10n.string("Copy Path")) {
             browser.copyPath(browser.currentURL)
         }
 
-        Button("Reveal in Finder") {
+        Button(L10n.string("Reveal in Finder")) {
             browser.revealInFinder(browser.currentURL)
         }
         .disabled(browser.isCurrentRemote)
@@ -1102,17 +1106,17 @@ struct ConnectServerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Connect")
+                Text(L10n.string("Connect"))
                     .font(.headline)
 
-                Text("Choose a protocol and enter a remote address.")
+                Text(L10n.string("Choose a protocol and enter a remote address."))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
 
-            Picker("Protocol", selection: $browser.connectProtocol) {
+            Picker(L10n.string("Protocol"), selection: $browser.connectProtocol) {
                 ForEach(RemoteConnectionKind.allCases) { kind in
-                    Text(kind.displayName).tag(kind)
+                    Text(L10n.string(kind.displayName)).tag(kind)
                 }
             }
             .pickerStyle(.segmented)
@@ -1125,7 +1129,7 @@ struct ConnectServerSheet: View {
                 }
             }
 
-            TextField("Location name (optional)", text: $browser.connectServerDisplayName)
+            TextField(L10n.string("Location name (optional)"), text: $browser.connectServerDisplayName)
                 .textFieldStyle(.roundedBorder)
                 .focused($focusedField, equals: .name)
                 .onSubmit {
@@ -1141,8 +1145,8 @@ struct ConnectServerSheet: View {
                 }
 
             if browser.connectProtocol == .s3 {
-                Picker("AWS profile", selection: $browser.connectAWSProfile) {
-                    Text("Default").tag("")
+                Picker(L10n.string("AWS profile"), selection: $browser.connectAWSProfile) {
+                    Text(L10n.string("Default")).tag("")
 
                     ForEach(browser.awsProfiles, id: \.self) { profile in
                         Text(profile).tag(profile)
@@ -1154,12 +1158,12 @@ struct ConnectServerSheet: View {
             HStack {
                 Spacer()
 
-                Button("Cancel") {
+                Button(L10n.string("Cancel")) {
                     browser.cancelConnectServerDialog()
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Connect") {
+                Button(L10n.string("Connect")) {
                     browser.commitConnectServerDialog()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1185,30 +1189,30 @@ struct LocationContextMenu: View {
     let location: SidebarLocation
 
     var body: some View {
-        Button(location.isUnavailable ? "Reconnect" : "Open") {
+        Button(L10n.string(location.isUnavailable ? "Reconnect" : "Open")) {
             browser.open(location)
         }
 
         Divider()
 
-        Button("Open in Terminal") {
+        Button(L10n.string("Open in Terminal")) {
             browser.openInTerminal(location.url)
         }
         .disabled(location.isUnavailable || S3Client.isS3URL(location.url))
 
-        Button("Open in iTerm") {
+        Button(L10n.string("Open in iTerm")) {
             browser.openIniTerm(location.url)
         }
         .disabled(!browser.isITermAvailable || location.isUnavailable || S3Client.isS3URL(location.url))
 
         Divider()
 
-        Button("Copy Path") {
+        Button(L10n.string("Copy Path")) {
             browser.copyPath(location.url)
         }
         .disabled(location.isUnavailable)
 
-        Button("Reveal in Finder") {
+        Button(L10n.string("Reveal in Finder")) {
             browser.revealInFinder(location.url)
         }
         .disabled(location.isUnavailable || SFTPClient.isSFTPURL(location.url) || S3Client.isS3URL(location.url))
@@ -1216,7 +1220,7 @@ struct LocationContextMenu: View {
         if location.canDisconnect {
             Divider()
 
-            Button("Disconnect") {
+            Button(L10n.string("Disconnect")) {
                 browser.disconnect(location)
             }
         }
@@ -1224,7 +1228,7 @@ struct LocationContextMenu: View {
         if location.canRemoveFromFavorites {
             Divider()
 
-            Button("Remove from Favorites") {
+            Button(L10n.string("Remove from Favorites")) {
                 browser.removeFavorite(location)
             }
         }
@@ -1236,14 +1240,14 @@ struct StatusBarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text("\(browser.items.count) items")
+            Text(L10n.format("items.count", browser.items.count))
 
             if !browser.selectedIDs.isEmpty {
-                Text("\(browser.selectedIDs.count) selected")
+                Text(L10n.format("items.selected", browser.selectedIDs.count))
             }
 
             if let operation = browser.pendingClipboardOperation {
-                Text(operation.mode == .cut ? "Cut ready" : "Copy ready")
+                Text(L10n.string(operation.mode == .cut ? "Cut ready" : "Copy ready"))
                     .foregroundStyle(.secondary)
             }
 
@@ -1282,10 +1286,10 @@ struct RenameSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Rename")
+            Text(L10n.string("Rename"))
                 .font(.headline)
 
-            TextField("Name", text: $name)
+            TextField(L10n.string("Name"), text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($isFocused)
                 .onSubmit {
@@ -1295,12 +1299,12 @@ struct RenameSheet: View {
             HStack {
                 Spacer()
 
-                Button("Cancel") {
+                Button(L10n.string("Cancel")) {
                     onCancel()
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Rename") {
+                Button(L10n.string("Rename")) {
                     onCommit(name)
                 }
                 .keyboardShortcut(.defaultAction)

@@ -29,6 +29,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var connectServerDisplayName = ""
     @Published var connectAWSProfile = ""
     @Published private(set) var awsProfiles: [String] = []
+    @Published private(set) var appLanguageMode: AppLanguageMode = L10n.languageMode
 
     private let fileManager = FileManager.default
     private let userFavoritesDefaultsKey = "Mihako.userFavoriteFolders"
@@ -1070,8 +1071,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func handleFileCutShortcut() {
-        guard !isTextInputActive else {
-            forwardTextAction(#selector(NSText.cut(_:)))
+        if forwardTextAction(#selector(NSText.cut(_:))) {
             return
         }
 
@@ -1079,8 +1079,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func handleFileCopyShortcut() {
-        guard !isTextInputActive else {
-            forwardTextAction(#selector(NSText.copy(_:)))
+        if forwardTextAction(#selector(NSText.copy(_:))) {
             return
         }
 
@@ -1088,12 +1087,20 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func handleFilePasteShortcut() {
-        guard !isTextInputActive else {
-            forwardTextAction(#selector(NSText.paste(_:)))
+        if forwardTextAction(#selector(NSText.paste(_:))) {
             return
         }
 
         pasteIntoCurrentFolder()
+    }
+
+    func handleSelectAllShortcut() {
+        if forwardTextAction(#selector(NSResponder.selectAll(_:))) {
+            return
+        }
+
+        selectedIDs = Set(items.map(\.url))
+        selectionAnchorURL = firstSelectedURLInDisplayOrder()
     }
 
     func pasteIntoCurrentFolder() {
@@ -1642,6 +1649,12 @@ final class FileBrowserViewModel: ObservableObject {
         errorMessage = nil
     }
 
+    func setAppLanguageMode(_ mode: AppLanguageMode) {
+        L10n.setLanguageMode(mode)
+        appLanguageMode = mode
+        refreshSidebarLocations()
+    }
+
     private static func makeSidebarSections(
         userFavoriteFolders: [URL],
         serverConnections: [ServerConnection],
@@ -1766,8 +1779,8 @@ final class FileBrowserViewModel: ObservableObject {
         name: String,
         isUnavailable: Bool
     ) -> String {
-        let suffix = isUnavailable ? " unavailable" : ""
-        return "\(kind.displayName) - \(name)\(suffix)"
+        let title = "\(L10n.string(kind.displayName)) - \(name)"
+        return isUnavailable ? L10n.format("location.unavailable", title) : title
     }
 
     private static func remoteConnectionTitle(
@@ -1787,8 +1800,7 @@ final class FileBrowserViewModel: ObservableObject {
             )
         }
 
-        let suffix = isUnavailable ? " unavailable" : ""
-        return "\(trimmedDisplayName)\(suffix)"
+        return isUnavailable ? L10n.format("location.unavailable", trimmedDisplayName) : trimmedDisplayName
     }
 
     private func normalizedRemoteAddress(
@@ -2809,7 +2821,7 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    private func forwardTextAction(_ selector: Selector) {
+    private func forwardTextAction(_ selector: Selector) -> Bool {
         NSApp.sendAction(selector, to: nil, from: nil)
     }
 
@@ -3155,7 +3167,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func presentError(_ error: Error, action: String) {
-        errorMessage = "\(action) failed: \(error.localizedDescription)"
+        errorMessage = L10n.format("error.action_failed", L10n.string(action), error.localizedDescription)
     }
 
     private func presentMessage(_ message: String) {

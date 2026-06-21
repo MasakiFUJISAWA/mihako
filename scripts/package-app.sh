@@ -5,6 +5,7 @@ APP_NAME="Mihako"
 APP_DIR=".build/release/${APP_NAME}.app"
 EXECUTABLE=".build/release/${APP_NAME}"
 ICON="Sources/Mihako/Resources/AppIcon.icns"
+RESOURCE_BUNDLE=".build/release/${APP_NAME}_${APP_NAME}.bundle"
 
 swift build -c release
 
@@ -15,6 +16,10 @@ cp "${EXECUTABLE}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 
 if [[ -f "${ICON}" ]]; then
     cp "${ICON}" "${APP_DIR}/Contents/Resources/AppIcon.icns"
+fi
+
+if [[ -d "${RESOURCE_BUNDLE}" ]]; then
+    cp -R "${RESOURCE_BUNDLE}" "${APP_DIR}/"
 fi
 
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST

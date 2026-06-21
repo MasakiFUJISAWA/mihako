@@ -50,7 +50,7 @@ final class MihakoApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let item = NSMenuItem(
-            title: "New Window",
+            title: L10n.string("New Window"),
             action: #selector(openNewWindowFromDock(_:)),
             keyEquivalent: ""
         )
@@ -99,12 +99,12 @@ struct BrowserCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Window") {
+            Button(L10n.string("New Window")) {
                 openWindow(id: "browser")
             }
             .keyboardShortcut("n", modifiers: [.command])
 
-            Button("New Folder") {
+            Button(L10n.string("New Folder")) {
                 browser?.createFolder()
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -112,33 +112,39 @@ struct BrowserCommands: Commands {
         }
 
         CommandGroup(replacing: .pasteboard) {
-            Button("Cut") {
+            Button(L10n.string("Cut")) {
                 browser?.handleFileCutShortcut()
             }
             .keyboardShortcut("x", modifiers: [.command])
             .disabled(browser == nil)
 
-            Button("Copy") {
+            Button(L10n.string("Copy")) {
                 browser?.handleFileCopyShortcut()
             }
             .keyboardShortcut("c", modifiers: [.command])
             .disabled(browser == nil)
 
-            Button("Paste") {
+            Button(L10n.string("Paste")) {
                 browser?.handleFilePasteShortcut()
             }
             .keyboardShortcut("v", modifiers: [.command])
             .disabled(browser == nil)
+
+            Button(L10n.string("Select All")) {
+                browser?.handleSelectAllShortcut()
+            }
+            .keyboardShortcut("a", modifiers: [.command])
+            .disabled(browser == nil)
         }
 
-        CommandMenu("Files") {
-            Button("Open") {
+        CommandMenu(L10n.string("Files")) {
+            Button(L10n.string("Open")) {
                 browser?.openSelected()
             }
             .keyboardShortcut(.return, modifiers: [])
             .disabled(browser?.selectedIDs.isEmpty ?? true)
 
-            Button("Rename") {
+            Button(L10n.string("Rename")) {
                 browser?.beginRenameSelected()
             }
             .keyboardShortcut(.return, modifiers: [.command])
@@ -146,11 +152,20 @@ struct BrowserCommands: Commands {
 
             Divider()
 
-            Button("Move to Trash") {
+            Button(L10n.string("Move to Trash")) {
                 browser?.trashSelection()
             }
             .keyboardShortcut(.delete, modifiers: [.command])
             .disabled(browser?.selectedIDs.isEmpty ?? true)
+        }
+
+        CommandMenu(L10n.string("Language")) {
+            ForEach(AppLanguageMode.allCases) { mode in
+                Button(L10n.string(mode.titleKey)) {
+                    browser?.setAppLanguageMode(mode)
+                }
+                .disabled(browser == nil || browser?.appLanguageMode == mode)
+            }
         }
     }
 }
