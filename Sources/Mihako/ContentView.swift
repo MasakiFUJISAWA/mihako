@@ -674,11 +674,12 @@ struct FileActionBarView: View {
             ToolbarIconButton(systemImageName: "terminal", help: "Open in Terminal") {
                 browser.openInTerminal(browser.currentURL)
             }
+            .disabled(browser.isCurrentS3)
 
             ToolbarIconButton(systemImageName: "terminal.fill", help: "Open in iTerm") {
                 browser.openIniTerm(browser.currentURL)
             }
-            .disabled(!browser.isITermAvailable)
+            .disabled(!browser.isITermAvailable || browser.isCurrentS3)
 
             Divider()
                 .frame(height: 22)
@@ -1025,16 +1026,17 @@ struct FileContextMenu: View {
         Button("Reveal in Finder") {
             browser.revealInFinder(item)
         }
-        .disabled(SFTPClient.isSFTPURL(item.url))
+        .disabled(SFTPClient.isSFTPURL(item.url) || S3Client.isS3URL(item.url))
 
         Button("Open in Terminal") {
             browser.openInTerminal(item.url)
         }
+        .disabled(S3Client.isS3URL(item.url))
 
         Button("Open in iTerm") {
             browser.openIniTerm(item.url)
         }
-        .disabled(!browser.isITermAvailable)
+        .disabled(!browser.isITermAvailable || S3Client.isS3URL(item.url))
 
         Divider()
 
@@ -1068,11 +1070,12 @@ struct FolderContextMenu: View {
         Button("Open in Terminal") {
             browser.openInTerminal(browser.currentURL)
         }
+        .disabled(browser.isCurrentS3)
 
         Button("Open in iTerm") {
             browser.openIniTerm(browser.currentURL)
         }
-        .disabled(!browser.isITermAvailable)
+        .disabled(!browser.isITermAvailable || browser.isCurrentS3)
 
         Divider()
 
@@ -1083,7 +1086,7 @@ struct FolderContextMenu: View {
         Button("Reveal in Finder") {
             browser.revealInFinder(browser.currentURL)
         }
-        .disabled(browser.isCurrentSFTP)
+        .disabled(browser.isCurrentRemote)
     }
 }
 
@@ -1171,12 +1174,12 @@ struct LocationContextMenu: View {
         Button("Open in Terminal") {
             browser.openInTerminal(location.url)
         }
-        .disabled(location.isUnavailable)
+        .disabled(location.isUnavailable || S3Client.isS3URL(location.url))
 
         Button("Open in iTerm") {
             browser.openIniTerm(location.url)
         }
-        .disabled(!browser.isITermAvailable || location.isUnavailable)
+        .disabled(!browser.isITermAvailable || location.isUnavailable || S3Client.isS3URL(location.url))
 
         Divider()
 
@@ -1188,7 +1191,7 @@ struct LocationContextMenu: View {
         Button("Reveal in Finder") {
             browser.revealInFinder(location.url)
         }
-        .disabled(location.isUnavailable || SFTPClient.isSFTPURL(location.url))
+        .disabled(location.isUnavailable || SFTPClient.isSFTPURL(location.url) || S3Client.isS3URL(location.url))
 
         if location.canDisconnect {
             Divider()

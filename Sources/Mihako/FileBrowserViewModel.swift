@@ -110,6 +110,10 @@ final class FileBrowserViewModel: ObservableObject {
             return SFTPClient.remotePath(for: currentURL) != "/"
         }
 
+        if isCurrentS3 {
+            return !S3Client.prefix(for: currentURL).isEmpty
+        }
+
         return currentURL.path != "/"
     }
 
@@ -122,7 +126,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     var selectedFolderURL: URL? {
-        guard !isCurrentSFTP else {
+        guard !isCurrentRemote else {
             return nil
         }
 
@@ -167,6 +171,14 @@ final class FileBrowserViewModel: ObservableObject {
         SFTPClient.isSFTPURL(currentURL)
     }
 
+    var isCurrentS3: Bool {
+        S3Client.isS3URL(currentURL)
+    }
+
+    var isCurrentRemote: Bool {
+        isCurrentSFTP || isCurrentS3
+    }
+
     var currentDisplayAddress: String {
         displayString(for: currentURL)
     }
@@ -174,6 +186,10 @@ final class FileBrowserViewModel: ObservableObject {
     var breadcrumbs: [Breadcrumb] {
         if isCurrentSFTP {
             return sftpBreadcrumbs()
+        }
+
+        if isCurrentS3 {
+            return s3Breadcrumbs()
         }
 
         var result: [Breadcrumb] = []
@@ -187,6 +203,31 @@ final class FileBrowserViewModel: ObservableObject {
                 path = (path as NSString).appendingPathComponent(component)
                 result.append(Breadcrumb(title: component, url: URL(fileURLWithPath: path, isDirectory: true)))
             }
+        }
+
+        return result
+    }
+
+    private func s3Breadcrumbs() -> [Breadcrumb] {
+        let bucketTitle = currentURL.host(percentEncoded: false) ?? "S3"
+        var result = [
+            Breadcrumb(title: bucketTitle, url: S3Client.url(bySettingPrefix: "", on: currentURL))
+        ]
+        let prefix = S3Client.prefix(for: currentURL).trimmingTrailingSlash
+
+        guard !prefix.isEmpty else {
+            return result
+        }
+
+        var accumulatedPrefix = ""
+        for component in prefix.split(separator: "/").map(String.init) {
+            accumulatedPrefix = accumulatedPrefix.isEmpty ? component : "\(accumulatedPrefix)/\(component)"
+            result.append(
+                Breadcrumb(
+                    title: component,
+                    url: S3Client.url(bySettingPrefix: "\(accumulatedPrefix)/", on: currentURL)
+                )
+            )
         }
 
         return result
@@ -222,6 +263,11 @@ final class FileBrowserViewModel: ObservableObject {
 
         if isCurrentSFTP {
             reloadSFTPDirectory()
+            return
+        }
+
+        if isCurrentS3 {
+            reloadS3Directory()
             return
         }
 
@@ -316,6 +362,59 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func reloadS3Directory() {
+        let requestedURL = currentURL
+        let shouldShowHiddenFiles = showHiddenFiles
+        remoteReloadTask?.cancel()
+        items = []
+
+        remoteReloadTask = Task { [weak self] in
+            do {
+                let result = try await S3Client.listDirectory(
+                    at: requestedURL,
+                    showHiddenFiles: shouldShowHiddenFiles
+                )
+
+                await MainActor.run {
+                    guard let self, !Task.isCancelled else {
+                        return
+                    }
+
+                    self.currentURL = result.url
+                    self.addressText = self.displayString(for: result.url)
+                    self.items = self.sortedItems(result.items)
+                    self.selectedIDs = self.selectedIDs.filter { selectedURL in
+                        self.items.contains { $0.url == selectedURL }
+                    }
+
+                    if let selectionAnchorURL = self.selectionAnchorURL,
+                       !self.items.contains(where: { $0.url == selectionAnchorURL }) {
+                        self.selectionAnchorURL = self.firstSelectedURLInDisplayOrder()
+                    }
+
+                    if self.history.indices.contains(self.historyIndex),
+                       self.history[self.historyIndex] == requestedURL {
+                        self.history[self.historyIndex] = result.url
+                    }
+
+                    self.markServerConnectionAvailable(result.url)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, !Task.isCancelled else {
+                        return
+                    }
+
+                    self.items = []
+                    self.selectedIDs.removeAll()
+                    self.selectionAnchorURL = nil
+                    self.markServerConnectionUnavailable(requestedURL)
+                    self.presentError(error, action: "Read S3 folder")
+                }
+            }
+        }
+    }
+
     func submitAddress() {
         let rawPath = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -335,11 +434,31 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if rawPath.lowercased().hasPrefix("s3://") {
+            guard let targetURL = URL(string: rawPath) else {
+                addressText = displayString(for: currentURL)
+                presentMessage("Invalid S3 URL: \(rawPath)")
+                return
+            }
+
+            navigate(to: targetURL)
+            return
+        }
+
         if isCurrentSFTP {
             let targetPath = rawPath.hasPrefix("/")
                 ? rawPath
                 : SFTPClient.remotePath(for: currentURL).appendingRemotePathComponent(rawPath)
             navigate(to: SFTPClient.url(bySettingPath: targetPath, on: currentURL))
+            return
+        }
+
+        if isCurrentS3 {
+            let currentPrefix = S3Client.directoryPrefix(for: currentURL)
+            let targetPrefix = rawPath.hasPrefix("/")
+                ? String(rawPath.drop { $0 == "/" })
+                : currentPrefix.appendingS3PrefixComponent(rawPath)
+            navigate(to: S3Client.url(bySettingPrefix: targetPrefix, on: currentURL))
             return
         }
 
@@ -358,6 +477,11 @@ final class FileBrowserViewModel: ObservableObject {
     func navigate(to url: URL, recordHistory: Bool = true) {
         if SFTPClient.isSFTPURL(url) {
             navigateToSFTP(url, recordHistory: recordHistory)
+            return
+        }
+
+        if S3Client.isS3URL(url) {
+            navigateToS3(url, recordHistory: recordHistory)
             return
         }
 
@@ -415,6 +539,26 @@ final class FileBrowserViewModel: ObservableObject {
         reload()
     }
 
+    private func navigateToS3(_ url: URL, recordHistory: Bool) {
+        currentURL = url
+        addressText = displayString(for: url)
+        selectedIDs.removeAll()
+        selectionAnchorURL = nil
+
+        if recordHistory {
+            if historyIndex < history.count - 1 {
+                history.removeSubrange((historyIndex + 1)..<history.count)
+            }
+
+            if history.last != url {
+                history.append(url)
+                historyIndex = history.count - 1
+            }
+        }
+
+        reload()
+    }
+
     func goBack() {
         guard canGoBack else {
             return
@@ -440,6 +584,8 @@ final class FileBrowserViewModel: ObservableObject {
 
         if isCurrentSFTP {
             navigate(to: SFTPClient.parentURL(for: currentURL))
+        } else if isCurrentS3 {
+            navigate(to: S3Client.parentURL(for: currentURL))
         } else {
             navigate(to: currentURL.deletingLastPathComponent())
         }
@@ -450,6 +596,8 @@ final class FileBrowserViewModel: ObservableObject {
             navigate(to: item.url)
         } else if SFTPClient.isSFTPURL(item.url) {
             downloadAndOpen(item.url)
+        } else if S3Client.isS3URL(item.url) {
+            downloadAndOpenS3(item.url)
         } else {
             NSWorkspace.shared.open(item.url)
         }
@@ -555,13 +703,29 @@ final class FileBrowserViewModel: ObservableObject {
                 completion(itemURLString.data(using: .utf8), nil)
                 return nil
             }
+        } else if S3Client.isS3URL(item.url) {
+            provider = NSItemProvider()
+            provider.registerDataRepresentation(
+                forTypeIdentifier: MihakoTransferType.s3URL,
+                visibility: .all
+            ) { completion in
+                completion(itemURLString.data(using: .utf8), nil)
+                return nil
+            }
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.url.identifier,
+                visibility: .all
+            ) { completion in
+                completion(itemURLString.data(using: .utf8), nil)
+                return nil
+            }
         } else {
             provider = NSItemProvider(object: item.url as NSURL)
         }
 
         provider.suggestedName = item.displayName
 
-        guard !SFTPClient.isSFTPURL(item.url) else {
+        guard !isRemoteURL(item.url) else {
             return provider
         }
 
@@ -645,6 +809,11 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if isCurrentS3 {
+            createS3Folder()
+            return
+        }
+
         let folderURL = uniqueURL(
             in: currentURL,
             baseName: "New Folder",
@@ -665,6 +834,11 @@ final class FileBrowserViewModel: ObservableObject {
     func createFile() {
         if isCurrentSFTP {
             createSFTPFile()
+            return
+        }
+
+        if isCurrentS3 {
+            createS3File()
             return
         }
 
@@ -725,6 +899,48 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func createS3Folder() {
+        let folderURL = uniqueS3URL(
+            in: currentURL,
+            baseName: "New Folder",
+            pathExtension: "",
+            isDirectory: true,
+            copyStyle: false
+        )
+
+        Task {
+            do {
+                try await S3Client.createDirectory(at: folderURL)
+                reload()
+                selectOnly(folderURL)
+                renameRequest = RenameRequest(url: folderURL, currentName: folderURL.lastPathComponent)
+            } catch {
+                presentError(error, action: "Create S3 folder")
+            }
+        }
+    }
+
+    private func createS3File() {
+        let fileURL = uniqueS3URL(
+            in: currentURL,
+            baseName: "New File",
+            pathExtension: "txt",
+            isDirectory: false,
+            copyStyle: false
+        )
+
+        Task {
+            do {
+                try await S3Client.createFile(at: fileURL)
+                reload()
+                selectOnly(fileURL)
+                renameRequest = RenameRequest(url: fileURL, currentName: fileURL.lastPathComponent)
+            } catch {
+                presentError(error, action: "Create S3 file")
+            }
+        }
+    }
+
     func beginRename(_ item: FileItem) {
         renameRequest = RenameRequest(url: item.url, currentName: item.displayName)
     }
@@ -761,6 +977,17 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if S3Client.isS3URL(url) {
+            let isDirectory = items.first(where: { $0.url == url })?.isDirectory ?? S3Client.isDirectoryURL(url)
+            let destinationURL = S3Client.childURL(
+                named: newName,
+                isDirectory: isDirectory,
+                in: S3Client.parentURL(for: url)
+            )
+            renameS3Item(from: url, to: destinationURL)
+            return
+        }
+
         guard !fileManager.fileExists(atPath: destinationURL.path) else {
             presentMessage("An item named \"\(newName)\" already exists.")
             return
@@ -790,6 +1017,24 @@ final class FileBrowserViewModel: ObservableObject {
                 selectOnly(destinationURL)
             } catch {
                 presentError(error, action: "Rename SFTP item")
+            }
+        }
+    }
+
+    private func renameS3Item(from sourceURL: URL, to destinationURL: URL) {
+        guard !items.contains(where: { $0.url == destinationURL || $0.name == destinationURL.lastPathComponent }) else {
+            presentMessage("An item named \"\(destinationURL.lastPathComponent)\" already exists.")
+            return
+        }
+
+        Task {
+            do {
+                try await S3Client.rename(from: sourceURL, to: destinationURL)
+                renameRequest = nil
+                reload()
+                selectOnly(destinationURL)
+            } catch {
+                presentError(error, action: "Rename S3 item")
             }
         }
     }
@@ -855,7 +1100,7 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
-        if SFTPClient.isSFTPURL(destinationFolder) || operation.urls.contains(where: SFTPClient.isSFTPURL) {
+        if isRemoteURL(destinationFolder) || operation.urls.contains(where: isRemoteURL) {
             transfer(operation.urls, into: destinationFolder, mode: operation.mode)
             return
         }
@@ -892,19 +1137,26 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func transfer(_ sourceURLs: [URL], into destinationFolder: URL, mode: FileClipboardMode) {
-        let remoteSources = sourceURLs.filter(SFTPClient.isSFTPURL)
-        let localSources = sourceURLs.filter { !SFTPClient.isSFTPURL($0) }
-        let destinationIsRemote = SFTPClient.isSFTPURL(destinationFolder)
+        let sftpSources = sourceURLs.filter(SFTPClient.isSFTPURL)
+        let s3Sources = sourceURLs.filter(S3Client.isS3URL)
+        let remoteSources = sftpSources + s3Sources
+        let localSources = sourceURLs.filter { !isRemoteURL($0) }
+        let destinationIsSFTP = SFTPClient.isSFTPURL(destinationFolder)
+        let destinationIsS3 = S3Client.isS3URL(destinationFolder)
 
         Task {
             do {
-                if destinationIsRemote {
+                if destinationIsSFTP || destinationIsS3 {
                     guard remoteSources.isEmpty else {
-                        presentMessage("SFTP to SFTP copy is not supported yet.")
+                        presentMessage("Remote to remote copy is not supported yet.")
                         return
                     }
 
-                    try await SFTPClient.upload(localURLs: localSources, to: destinationFolder)
+                    if destinationIsSFTP {
+                        try await SFTPClient.upload(localURLs: localSources, to: destinationFolder)
+                    } else {
+                        try await S3Client.upload(localURLs: localSources, to: destinationFolder)
+                    }
 
                     if mode == .cut {
                         try removeLocalItemsAfterRemoteMove(localSources)
@@ -914,11 +1166,19 @@ final class FileBrowserViewModel: ObservableObject {
                         try copyLocalItems(localSources, into: destinationFolder, mode: mode)
                     }
 
-                    if !remoteSources.isEmpty {
-                        try await SFTPClient.download(remoteURLs: remoteSources, to: destinationFolder)
+                    if !sftpSources.isEmpty {
+                        try await SFTPClient.download(remoteURLs: sftpSources, to: destinationFolder)
 
                         if mode == .cut {
-                            try await SFTPClient.remove(remoteSources)
+                            try await SFTPClient.remove(sftpSources)
+                        }
+                    }
+
+                    if !s3Sources.isEmpty {
+                        try await S3Client.download(remoteURLs: s3Sources, to: destinationFolder)
+
+                        if mode == .cut {
+                            try await S3Client.remove(s3Sources)
                         }
                     }
                 }
@@ -961,6 +1221,11 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if S3Client.isS3URL(item.url) {
+            duplicateS3Item(item)
+            return
+        }
+
         do {
             let destinationURL = uniqueDestinationURL(for: item.url, in: item.url.deletingLastPathComponent())
             try fileManager.copyItem(at: item.url, to: destinationURL)
@@ -994,6 +1259,30 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func duplicateS3Item(_ item: FileItem) {
+        let baseName = item.isDirectory || item.url.pathExtension.isEmpty
+            ? item.displayName
+            : (item.displayName as NSString).deletingPathExtension
+        let pathExtension = item.isDirectory ? "" : item.url.pathExtension
+        let destinationURL = uniqueS3URL(
+            in: S3Client.parentURL(for: item.url),
+            baseName: baseName,
+            pathExtension: pathExtension,
+            isDirectory: item.isDirectory,
+            copyStyle: true
+        )
+
+        Task {
+            do {
+                try await S3Client.duplicate(from: item.url, to: destinationURL)
+                reload()
+                selectOnly(destinationURL)
+            } catch {
+                presentError(error, action: "Duplicate S3 item")
+            }
+        }
+    }
+
     func trashSelection() {
         let urls = selectedURLs
 
@@ -1001,8 +1290,8 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
-        if urls.contains(where: SFTPClient.isSFTPURL) {
-            deleteSFTPItems(urls)
+        if urls.contains(where: isRemoteURL) {
+            deleteRemoteItems(urls)
             return
         }
 
@@ -1018,13 +1307,31 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    private func deleteSFTPItems(_ urls: [URL]) {
+    private func deleteRemoteItems(_ urls: [URL]) {
+        let localURLs = urls.filter { !isRemoteURL($0) }
+        let sftpURLs = urls.filter(SFTPClient.isSFTPURL)
+        let s3URLs = urls.filter(S3Client.isS3URL)
+
         Task {
             do {
-                try await SFTPClient.remove(urls)
+                if !localURLs.isEmpty {
+                    for url in localURLs {
+                        var resultingURL: NSURL?
+                        try fileManager.trashItem(at: url, resultingItemURL: &resultingURL)
+                    }
+                }
+
+                if !sftpURLs.isEmpty {
+                    try await SFTPClient.remove(sftpURLs)
+                }
+
+                if !s3URLs.isEmpty {
+                    try await S3Client.remove(s3URLs)
+                }
+
                 reload()
             } catch {
-                presentError(error, action: "Delete SFTP item")
+                presentError(error, action: "Delete remote item")
             }
         }
     }
@@ -1044,8 +1351,8 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func revealInFinder(_ url: URL) {
-        guard !SFTPClient.isSFTPURL(url) else {
-            presentMessage("Reveal in Finder is not available for SFTP locations.")
+        guard !isRemoteURL(url) else {
+            presentMessage("Reveal in Finder is not available for remote locations.")
             return
         }
 
@@ -1120,11 +1427,13 @@ final class FileBrowserViewModel: ObservableObject {
 
         let url = location.url
         if let connectionURL = location.connectionURL,
-           (remoteConnectionKind(for: connectionURL.absoluteString) ?? .smb) == .sftp {
-            removeServerConnection(kind: .sftp, url: connectionURL)
+           let kind = remoteConnectionKind(for: connectionURL.absoluteString),
+           kind == .sftp || kind == .s3 {
+            removeServerConnection(kind: kind, url: connectionURL)
             refreshSidebarLocations()
 
-            if SFTPClient.isSFTPURL(currentURL),
+            if (kind == .sftp && SFTPClient.isSFTPURL(currentURL)
+                || kind == .s3 && S3Client.isS3URL(currentURL)),
                currentURL.host(percentEncoded: false) == connectionURL.host(percentEncoded: false) {
                 navigate(to: fileManager.homeDirectoryForCurrentUser)
             }
@@ -1164,8 +1473,8 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
-        guard !urls.contains(where: SFTPClient.isSFTPURL) else {
-            presentMessage("AirDrop is not available for SFTP items.")
+        guard !urls.contains(where: isRemoteURL) else {
+            presentMessage("AirDrop is not available for remote items.")
             return
         }
 
@@ -1361,7 +1670,7 @@ final class FileBrowserViewModel: ObservableObject {
             }
             let kind = connection.kind
 
-            if kind == .sftp {
+            if kind == .sftp || kind == .s3 {
                 return SidebarLocation(
                     title: remoteConnectionTitle(
                         for: connection,
@@ -1514,6 +1823,11 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if kind == .s3 {
+            connectS3Server(url: url, displayName: displayName, silentFailure: silentFailure)
+            return
+        }
+
         let connectionID = serverConnectionID(kind: kind, urlString: url.absoluteString)
 
         guard reconnectingServerIDs.insert(connectionID).inserted else {
@@ -1606,8 +1920,50 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func connectS3Server(url: URL, displayName: String?, silentFailure: Bool) {
+        let connectionID = serverConnectionID(kind: .s3, urlString: url.absoluteString)
+
+        guard reconnectingServerIDs.insert(connectionID).inserted else {
+            return
+        }
+
+        Task {
+            do {
+                let result = try await S3Client.listDirectory(at: url, showHiddenFiles: showHiddenFiles)
+                reconnectingServerIDs.remove(connectionID)
+                upsertServerConnection(
+                    kind: .s3,
+                    url: result.url,
+                    replacing: url,
+                    displayName: displayName,
+                    mountURL: nil,
+                    isUnavailable: false
+                )
+                refreshSidebarLocations()
+
+                if !silentFailure {
+                    navigate(to: result.url)
+                }
+            } catch {
+                reconnectingServerIDs.remove(connectionID)
+                upsertServerConnection(
+                    kind: .s3,
+                    url: url,
+                    displayName: displayName,
+                    mountURL: nil,
+                    isUnavailable: true
+                )
+                refreshSidebarLocations()
+
+                if !silentFailure {
+                    presentError(error, action: "Connect S3")
+                }
+            }
+        }
+    }
+
     private func isServerConnectionAvailable(_ connection: ServerConnection) -> Bool {
-        if connection.kind == .sftp {
+        if connection.kind == .sftp || connection.kind == .s3 {
             return !connection.isUnavailable
         }
 
@@ -1676,9 +2032,19 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func markServerConnectionAvailable(_ url: URL) {
-        guard SFTPClient.isSFTPURL(url),
+        let kind: RemoteConnectionKind
+
+        if SFTPClient.isSFTPURL(url) {
+            kind = .sftp
+        } else if S3Client.isS3URL(url) {
+            kind = .s3
+        } else {
+            return
+        }
+
+        guard
               let index = serverConnections.firstIndex(where: {
-                  $0.kind == .sftp && $0.urlString == url.absoluteString
+                  $0.kind == kind && $0.urlString == url.absoluteString
               }) else {
             return
         }
@@ -1689,9 +2055,19 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func markServerConnectionUnavailable(_ url: URL) {
-        guard SFTPClient.isSFTPURL(url),
+        let kind: RemoteConnectionKind
+
+        if SFTPClient.isSFTPURL(url) {
+            kind = .sftp
+        } else if S3Client.isS3URL(url) {
+            kind = .s3
+        } else {
+            return
+        }
+
+        guard
               let index = serverConnections.firstIndex(where: {
-                  $0.kind == .sftp && $0.urlString == url.absoluteString
+                  $0.kind == kind && $0.urlString == url.absoluteString
               }) else {
             return
         }
@@ -2116,7 +2492,11 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private static func sidebarDeduplicationPath(for url: URL) -> String {
-        url
+        if SFTPClient.isSFTPURL(url) || S3Client.isS3URL(url) {
+            return url.absoluteString
+        }
+
+        return url
             .resolvingSymlinksInPath()
             .standardizedFileURL
             .path
@@ -2220,6 +2600,45 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func uniqueS3URL(
+        in folder: URL,
+        baseName: String,
+        pathExtension: String,
+        isDirectory: Bool,
+        copyStyle: Bool
+    ) -> URL {
+        let existingNames = Set(items.map(\.name))
+
+        func makeName(_ name: String) -> String {
+            if pathExtension.isEmpty {
+                return name
+            }
+
+            return "\(name).\(pathExtension)"
+        }
+
+        let firstName = makeName(baseName)
+
+        guard existingNames.contains(firstName) else {
+            return S3Client.childURL(named: firstName, isDirectory: isDirectory, in: folder)
+        }
+
+        var index = 2
+
+        while true {
+            let suffix = copyStyle
+                ? (index == 2 ? " copy" : " copy \(index)")
+                : " \(index)"
+            let candidateName = makeName("\(baseName)\(suffix)")
+
+            if !existingNames.contains(candidateName) {
+                return S3Client.childURL(named: candidateName, isDirectory: isDirectory, in: folder)
+            }
+
+            index += 1
+        }
+    }
+
     private func uniqueURL(
         in folder: URL,
         baseName: String,
@@ -2296,6 +2715,21 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func downloadAndOpenS3(_ url: URL) {
+        let destinationFolder = fileManager.temporaryDirectory
+            .appendingPathComponent("MihakoRemoteOpen", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        Task {
+            do {
+                try await S3Client.download(remoteURLs: [url], to: destinationFolder)
+                NSWorkspace.shared.open(destinationFolder.appendingPathComponent(url.lastPathComponent))
+            } catch {
+                presentError(error, action: "Open S3 item")
+            }
+        }
+    }
+
     private func forwardTextAction(_ selector: Selector) {
         NSApp.sendAction(selector, to: nil, from: nil)
     }
@@ -2355,7 +2789,19 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func displayString(for url: URL) -> String {
-        SFTPClient.isSFTPURL(url) ? SFTPClient.displayString(for: url) : url.path
+        if SFTPClient.isSFTPURL(url) {
+            return SFTPClient.displayString(for: url)
+        }
+
+        if S3Client.isS3URL(url) {
+            return S3Client.displayString(for: url)
+        }
+
+        return url.path
+    }
+
+    private func isRemoteURL(_ url: URL) -> Bool {
+        SFTPClient.isSFTPURL(url) || S3Client.isS3URL(url)
     }
 
     private nonisolated static func filePath(fromDroppedItem item: NSSecureCoding?) -> String? {
@@ -2460,6 +2906,10 @@ final class FileBrowserViewModel: ObservableObject {
             return try remoteTerminalCommand(for: url)
         }
 
+        if S3Client.isS3URL(url) {
+            throw S3ClientError.commandFailed("Open in Terminal is not available for S3 locations.")
+        }
+
         let directoryURL = directoryURL(for: url)
         return "cd \(shellQuoted(directoryURL.path))"
     }
@@ -2468,14 +2918,25 @@ final class FileBrowserViewModel: ObservableObject {
         let spec = try SFTPClient.connectionSpec(for: url)
         let remotePath = remoteDirectoryPath(for: url)
         let remoteCommand = "cd \(shellQuoted(remotePath)) && exec ${SHELL:-/bin/sh} -l"
-        var arguments = ["ssh"]
+        var baseArguments = ["ssh"]
+        var warningSuppressedArguments = ["ssh", "-o", "WarnWeakCrypto=no-pq-kex"]
+        var probeArguments = ["ssh", "-G", "-o", "WarnWeakCrypto=no-pq-kex"]
 
         if let port = spec.port {
-            arguments.append(contentsOf: ["-p", String(port)])
+            baseArguments.append(contentsOf: ["-p", String(port)])
+            warningSuppressedArguments.append(contentsOf: ["-p", String(port)])
+            probeArguments.append(contentsOf: ["-p", String(port)])
         }
 
-        arguments.append(contentsOf: ["-t", spec.target, remoteCommand])
-        return arguments.map(shellQuoted).joined(separator: " ")
+        baseArguments.append(contentsOf: ["-t", spec.target, remoteCommand])
+        warningSuppressedArguments.append(contentsOf: ["-t", spec.target, remoteCommand])
+        probeArguments.append(spec.target)
+
+        let probeCommand = probeArguments.map(shellQuoted).joined(separator: " ")
+        let warningSuppressedCommand = warningSuppressedArguments.map(shellQuoted).joined(separator: " ")
+        let baseCommand = baseArguments.map(shellQuoted).joined(separator: " ")
+
+        return "if \(probeCommand) >/dev/null 2>&1; then exec \(warningSuppressedCommand); else exec \(baseCommand); fi"
     }
 
     private func remoteDirectoryPath(for url: URL) -> String {
@@ -2656,5 +3117,29 @@ private extension String {
         }
 
         return "\(self)/\(component)"
+    }
+
+    func appendingS3PrefixComponent(_ component: String) -> String {
+        let trimmedComponent = component.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        guard !trimmedComponent.isEmpty else {
+            return self
+        }
+
+        if isEmpty {
+            return trimmedComponent
+        }
+
+        return hasSuffix("/") ? "\(self)\(trimmedComponent)" : "\(self)/\(trimmedComponent)"
+    }
+
+    var trimmingTrailingSlash: String {
+        var result = self
+
+        while result.hasSuffix("/") {
+            result.removeLast()
+        }
+
+        return result
     }
 }

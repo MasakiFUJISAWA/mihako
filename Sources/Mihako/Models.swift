@@ -33,9 +33,11 @@ struct RenameRequest: Identifiable {
 
 enum MihakoTransferType {
     static let sftpURL = "dev.masakifujisawa.mihako.sftp-url"
+    static let s3URL = "dev.masakifujisawa.mihako.s3-url"
 
     static let urlDropTypeIdentifiers = [
         sftpURL,
+        s3URL,
         UTType.fileURL.identifier,
         UTType.url.identifier
     ]
