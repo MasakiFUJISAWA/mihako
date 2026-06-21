@@ -30,6 +30,8 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var connectAWSProfile = ""
     @Published private(set) var awsProfiles: [String] = []
     @Published private(set) var appLanguageMode: AppLanguageMode = L10n.languageMode
+    @Published private(set) var externalTools: [ExternalTool] = []
+    @Published var isExternalToolsSettingsPresented = false
 
     private let fileManager = FileManager.default
     private let userFavoritesDefaultsKey = "Mihako.userFavoriteFolders"
@@ -37,6 +39,7 @@ final class FileBrowserViewModel: ObservableObject {
     private let serverConnectionsDefaultsKey = "Mihako.serverConnections"
     private let legacyServerConnectionsDefaultsKey = "My" + "Finder.serverConnections"
     private let sidebarLocationOrderDefaultsKey = "Mihako.sidebarLocationOrder"
+    private let externalToolsDefaultsKey = "Mihako.externalTools"
     private var history: [URL]
     private var historyIndex = 0
     private var selectionAnchorURL: URL?
@@ -49,36 +52,13 @@ final class FileBrowserViewModel: ObservableObject {
         case iTerm
     }
 
-    private enum ExternalEditor {
-        case webStorm
-        case pyCharm
-        case vsCode
-
-        var displayName: String {
-            switch self {
-            case .webStorm:
-                return "WebStorm"
-            case .pyCharm:
-                return "PyCharm"
-            case .vsCode:
-                return "VSCode"
-            }
-        }
-
-        var bundleIdentifiers: [String] {
-            switch self {
-            case .webStorm:
-                return ["com.jetbrains.WebStorm"]
-            case .pyCharm:
-                return ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"]
-            case .vsCode:
-                return ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"]
-            }
-        }
-    }
-
     private var iTermApplicationURL: URL? {
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2")
+    }
+
+    private var terminalApplicationURL: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+            ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
     }
 
     init(startURL: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -95,6 +75,7 @@ final class FileBrowserViewModel: ObservableObject {
             legacyDefaultsKey: legacyServerConnectionsDefaultsKey
         )
         sidebarLocationOrderIDs = Self.loadSidebarLocationOrder(defaultsKey: sidebarLocationOrderDefaultsKey)
+        externalTools = Self.loadExternalTools(defaultsKey: externalToolsDefaultsKey)
         refreshSidebarLocations()
         reload()
         reconnectSavedServers()
@@ -144,18 +125,6 @@ final class FileBrowserViewModel: ObservableObject {
 
     var isITermAvailable: Bool {
         iTermApplicationURL != nil
-    }
-
-    var canOpenSelectedFolderInWebStorm: Bool {
-        canOpenSelectedFolder(in: .webStorm)
-    }
-
-    var canOpenSelectedFolderInPyCharm: Bool {
-        canOpenSelectedFolder(in: .pyCharm)
-    }
-
-    var canOpenSelectedFolderInVSCode: Bool {
-        canOpenSelectedFolder(in: .vsCode)
     }
 
     var isTextInputActive: Bool {
@@ -1509,16 +1478,77 @@ final class FileBrowserViewModel: ObservableObject {
         openDirectory(url, in: .iTerm)
     }
 
-    func openSelectedFolderInWebStorm() {
-        openSelectedFolder(in: .webStorm)
+    func showExternalToolsSettings() {
+        isExternalToolsSettingsPresented = true
     }
 
-    func openSelectedFolderInPyCharm() {
-        openSelectedFolder(in: .pyCharm)
+    func saveExternalTools(_ tools: [ExternalTool]) {
+        externalTools = tools.map(\.normalized)
+        saveExternalTools()
+        isExternalToolsSettingsPresented = false
     }
 
-    func openSelectedFolderInVSCode() {
-        openSelectedFolder(in: .vsCode)
+    func resetExternalTools() {
+        externalTools = ExternalTool.defaultTools
+        saveExternalTools()
+    }
+
+    func openExternalTool(_ tool: ExternalTool) {
+        let normalizedTool = tool.normalized
+
+        switch normalizedTool.kind {
+        case .terminal:
+            guard let targetURL = targetURL(for: normalizedTool) else {
+                presentMessage("Select one folder to open in \(normalizedTool.title).")
+                return
+            }
+
+            openDirectory(targetURL, in: .terminal)
+        case .iTerm:
+            guard let targetURL = targetURL(for: normalizedTool) else {
+                presentMessage("Select one folder to open in \(normalizedTool.title).")
+                return
+            }
+
+            openDirectory(targetURL, in: .iTerm)
+        case .application:
+            openFolderWithApplicationTool(normalizedTool)
+        }
+    }
+
+    func canOpenExternalTool(_ tool: ExternalTool) -> Bool {
+        let normalizedTool = tool.normalized
+
+        switch normalizedTool.kind {
+        case .terminal:
+            guard let targetURL = targetURL(for: normalizedTool) else {
+                return false
+            }
+
+            return !S3Client.isS3URL(targetURL)
+        case .iTerm:
+            guard let targetURL = targetURL(for: normalizedTool) else {
+                return false
+            }
+
+            return isITermAvailable && !S3Client.isS3URL(targetURL)
+        case .application:
+            guard let targetURL = targetURL(for: normalizedTool),
+                  !isRemoteURL(targetURL) else {
+                return false
+            }
+
+            return applicationURL(for: normalizedTool) != nil
+        }
+    }
+
+    func applicationIcon(for tool: ExternalTool) -> NSImage? {
+        guard tool.iconMode == .applicationIcon,
+              let applicationURL = applicationURL(for: tool.normalized) else {
+            return nil
+        }
+
+        return NSWorkspace.shared.icon(forFile: applicationURL.path)
     }
 
     func refreshSidebarLocations() {
@@ -2513,6 +2543,14 @@ final class FileBrowserViewModel: ObservableObject {
         UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
     }
 
+    private static func loadExternalTools(defaultsKey: String) -> [ExternalTool] {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
+            return ExternalTool.defaultTools
+        }
+
+        return (try? JSONDecoder().decode([ExternalTool].self, from: data).map(\.normalized)) ?? ExternalTool.defaultTools
+    }
+
     private static func orderedLocations(
         _ locations: [SidebarLocation],
         orderIDs: [String]
@@ -2866,6 +2904,14 @@ final class FileBrowserViewModel: ObservableObject {
         UserDefaults.standard.set(data, forKey: serverConnectionsDefaultsKey)
     }
 
+    private func saveExternalTools() {
+        guard let data = try? JSONEncoder().encode(externalTools) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: externalToolsDefaultsKey)
+    }
+
     private func currentLocationIDs() -> [String]? {
         sidebarSections
             .first { $0.title == "Locations" }?
@@ -3039,14 +3085,14 @@ final class FileBrowserViewModel: ObservableObject {
         return SFTPClient.remotePath(for: url)
     }
 
-    private func openSelectedFolder(in editor: ExternalEditor) {
-        guard let folderURL = selectedFolderURL else {
-            presentMessage("Select one folder to open in \(editor.displayName).")
+    private func openFolderWithApplicationTool(_ tool: ExternalTool) {
+        guard let folderURL = targetURL(for: tool), !isRemoteURL(folderURL) else {
+            presentMessage("Select one local folder to open in \(tool.title).")
             return
         }
 
-        guard let applicationURL = applicationURL(for: editor) else {
-            presentMessage("\(editor.displayName) is not installed.")
+        guard let applicationURL = applicationURL(for: tool) else {
+            presentMessage("\(tool.title) is not installed.")
             return
         }
 
@@ -3063,17 +3109,42 @@ final class FileBrowserViewModel: ObservableObject {
             }
 
             Task { @MainActor in
-                self?.presentError(error, action: "Open in \(editor.displayName)")
+                self?.presentError(error, action: "Open in \(tool.title)")
             }
         }
     }
 
-    private func canOpenSelectedFolder(in editor: ExternalEditor) -> Bool {
-        selectedFolderURL != nil && applicationURL(for: editor) != nil
+    private func targetURL(for tool: ExternalTool) -> URL? {
+        switch tool.target {
+        case .currentFolder:
+            return currentURL
+        case .selectedFolder:
+            guard selectedIDs.count == 1,
+                  let item = selectedItems.first,
+                  item.canNavigateInto else {
+                return nil
+            }
+
+            return item.url
+        }
     }
 
-    private func applicationURL(for editor: ExternalEditor) -> URL? {
-        for bundleIdentifier in editor.bundleIdentifiers {
+    private func applicationURL(for tool: ExternalTool) -> URL? {
+        if let applicationPath = tool.applicationPath,
+           fileManager.fileExists(atPath: applicationPath) {
+            return URL(fileURLWithPath: applicationPath)
+        }
+
+        switch tool.kind {
+        case .terminal:
+            return terminalApplicationURL
+        case .iTerm:
+            return iTermApplicationURL
+        case .application:
+            break
+        }
+
+        for bundleIdentifier in tool.bundleIdentifiers {
             if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
                 return url
             }

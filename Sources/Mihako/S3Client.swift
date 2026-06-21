@@ -169,6 +169,80 @@ enum S3Client {
         var seenNames: Set<String> = []
         var continuationToken: String?
 
+        func addDirectory(prefix directoryPrefix: String, name: String, modifiedAt: Date? = nil) {
+            guard !name.isEmpty,
+                  seenNames.insert(name).inserted,
+                  showHiddenFiles || !name.hasPrefix(".") else {
+                return
+            }
+
+            items.append(
+                FileItem(
+                    url: Self.url(bucket: spec.bucket, prefix: Self.directoryPrefix(directoryPrefix), profile: spec.profile),
+                    name: name,
+                    isDirectory: true,
+                    isPackage: false,
+                    size: nil,
+                    modifiedAt: modifiedAt,
+                    kind: "Folder",
+                    isHidden: name.hasPrefix(".")
+                )
+            )
+        }
+
+        func addObject(_ object: Object, synthesizeNestedDirectory: Bool) {
+            guard object.key != spec.prefix,
+                  let relativeKey = Self.relativeKey(forKey: object.key, parentPrefix: spec.prefix) else {
+                return
+            }
+
+            let displayKey = relativeKey.trimmingTrailingSlash
+
+            guard !displayKey.isEmpty else {
+                return
+            }
+
+            if let separatorIndex = displayKey.firstIndex(of: "/") {
+                guard synthesizeNestedDirectory else {
+                    return
+                }
+
+                let directoryName = String(displayKey[..<separatorIndex])
+                let directoryKey = Self.appendingPrefixComponent(directoryName, to: spec.prefix)
+                addDirectory(prefix: directoryKey, name: directoryName)
+                return
+            }
+
+            let isDirectory = object.key.hasSuffix("/")
+
+            if isDirectory {
+                addDirectory(
+                    prefix: object.key,
+                    name: displayKey,
+                    modifiedAt: object.lastModified.flatMap(parseDate)
+                )
+                return
+            }
+
+            guard seenNames.insert(displayKey).inserted,
+                  showHiddenFiles || !displayKey.hasPrefix(".") else {
+                return
+            }
+
+            items.append(
+                FileItem(
+                    url: Self.url(bucket: spec.bucket, prefix: object.key, profile: spec.profile),
+                    name: displayKey,
+                    isDirectory: false,
+                    isPackage: false,
+                    size: object.size,
+                    modifiedAt: object.lastModified.flatMap(parseDate),
+                    kind: "File",
+                    isHidden: displayKey.hasPrefix(".")
+                )
+            )
+        }
+
         repeat {
             var arguments = [
                 "s3api", "list-objects-v2",
@@ -190,60 +264,45 @@ enum S3Client {
 
             for commonPrefix in response.commonPrefixes ?? [] {
                 let name = displayName(forKey: commonPrefix.prefix, parentPrefix: spec.prefix)
-
-                guard !name.isEmpty,
-                      seenNames.insert(name).inserted,
-                      showHiddenFiles || !name.hasPrefix(".") else {
-                    continue
-                }
-
-                items.append(
-                    FileItem(
-                        url: Self.url(bucket: spec.bucket, prefix: commonPrefix.prefix, profile: spec.profile),
-                        name: name,
-                        isDirectory: true,
-                        isPackage: false,
-                        size: nil,
-                        modifiedAt: nil,
-                        kind: "Folder",
-                        isHidden: name.hasPrefix(".")
-                    )
-                )
+                addDirectory(prefix: commonPrefix.prefix, name: name)
             }
 
             for object in response.contents ?? [] {
-                guard object.key != spec.prefix else {
-                    continue
-                }
-
-                let name = displayName(forKey: object.key, parentPrefix: spec.prefix)
-                let isDirectory = object.key.hasSuffix("/")
-
-                guard !name.isEmpty,
-                      !name.contains("/"),
-                      seenNames.insert(name).inserted,
-                      showHiddenFiles || !name.hasPrefix(".") else {
-                    continue
-                }
-
-                items.append(
-                    FileItem(
-                        url: Self.url(bucket: spec.bucket, prefix: object.key, profile: spec.profile),
-                        name: name,
-                        isDirectory: isDirectory,
-                        isPackage: false,
-                        size: isDirectory ? nil : object.size,
-                        modifiedAt: object.lastModified.flatMap(parseDate),
-                        kind: isDirectory ? "Folder" : "File",
-                        isHidden: name.hasPrefix(".")
-                    )
-                )
+                addObject(object, synthesizeNestedDirectory: false)
             }
 
             continuationToken = response.isTruncated == true
                 ? response.nextContinuationToken
                 : nil
         } while continuationToken != nil
+
+        if items.isEmpty, !spec.prefix.isEmpty {
+            continuationToken = nil
+
+            repeat {
+                var arguments = [
+                    "s3api", "list-objects-v2",
+                    "--bucket", spec.bucket,
+                    "--prefix", spec.prefix,
+                    "--output", "json"
+                ]
+
+                if let continuationToken {
+                    arguments.append(contentsOf: ["--continuation-token", continuationToken])
+                }
+
+                let result = try await runAWS(arguments, profile: spec.profile)
+                let response = try JSONDecoder().decode(ListResponse.self, from: result.output)
+
+                for object in response.contents ?? [] {
+                    addObject(object, synthesizeNestedDirectory: true)
+                }
+
+                continuationToken = response.isTruncated == true
+                    ? response.nextContinuationToken
+                    : nil
+            } while continuationToken != nil
+        }
 
         return (resolvedURL, items)
     }
@@ -439,14 +498,24 @@ enum S3Client {
     }
 
     private static func displayName(forKey key: String, parentPrefix: String) -> String {
-        let trimmedParent = directoryPrefix(parentPrefix)
-        var relativeName = key
+        relativeKey(forKey: key, parentPrefix: parentPrefix)?
+            .trimmingTrailingSlash
+            ?? key.trimmingTrailingSlash
+    }
 
-        if !trimmedParent.isEmpty, relativeName.hasPrefix(trimmedParent) {
-            relativeName.removeFirst(trimmedParent.count)
+    private static func relativeKey(forKey key: String, parentPrefix: String) -> String? {
+        let normalizedParent = directoryPrefix(parentPrefix)
+        var relativeKey = key
+
+        if !normalizedParent.isEmpty {
+            guard relativeKey.hasPrefix(normalizedParent) else {
+                return nil
+            }
+
+            relativeKey.removeFirst(normalizedParent.count)
         }
 
-        return relativeName.trimmingTrailingSlash
+        return relativeKey
     }
 
     static func isDirectoryURL(_ url: URL) -> Bool {

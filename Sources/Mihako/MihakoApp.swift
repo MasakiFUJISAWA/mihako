@@ -109,6 +109,28 @@ struct BrowserCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
             .disabled(browser == nil)
+
+            Divider()
+
+            Button(L10n.string("Open")) {
+                browser?.openSelected()
+            }
+            .keyboardShortcut(.return, modifiers: [])
+            .disabled(browser?.selectedIDs.isEmpty ?? true)
+
+            Button(L10n.string("Rename")) {
+                browser?.beginRenameSelected()
+            }
+            .keyboardShortcut(.return, modifiers: [.command])
+            .disabled((browser?.selectedIDs.count ?? 0) != 1)
+
+            Divider()
+
+            Button(L10n.string("Move to Trash")) {
+                browser?.trashSelection()
+            }
+            .keyboardShortcut(.delete, modifiers: [.command])
+            .disabled(browser?.selectedIDs.isEmpty ?? true)
         }
 
         CommandGroup(replacing: .pasteboard) {
@@ -137,34 +159,21 @@ struct BrowserCommands: Commands {
             .disabled(browser == nil)
         }
 
-        CommandMenu(L10n.string("Files")) {
-            Button(L10n.string("Open")) {
-                browser?.openSelected()
+        CommandGroup(after: .appSettings) {
+            Button(L10n.string("External Tools...")) {
+                browser?.showExternalToolsSettings()
             }
-            .keyboardShortcut(.return, modifiers: [])
-            .disabled(browser?.selectedIDs.isEmpty ?? true)
-
-            Button(L10n.string("Rename")) {
-                browser?.beginRenameSelected()
-            }
-            .keyboardShortcut(.return, modifiers: [.command])
-            .disabled((browser?.selectedIDs.count ?? 0) != 1)
+            .disabled(browser == nil)
 
             Divider()
 
-            Button(L10n.string("Move to Trash")) {
-                browser?.trashSelection()
-            }
-            .keyboardShortcut(.delete, modifiers: [.command])
-            .disabled(browser?.selectedIDs.isEmpty ?? true)
-        }
-
-        CommandMenu(L10n.string("Language")) {
-            ForEach(AppLanguageMode.allCases) { mode in
-                Button(L10n.string(mode.titleKey)) {
-                    browser?.setAppLanguageMode(mode)
+            Menu(L10n.string("Language")) {
+                ForEach(AppLanguageMode.allCases) { mode in
+                    Button(L10n.string(mode.titleKey)) {
+                        browser?.setAppLanguageMode(mode)
+                    }
+                    .disabled(browser == nil || browser?.appLanguageMode == mode)
                 }
-                .disabled(browser == nil || browser?.appLanguageMode == mode)
             }
         }
     }

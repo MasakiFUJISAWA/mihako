@@ -12,7 +12,7 @@ Mihako は Swift / SwiftUI / AppKit で作っている macOS アプリです。S
 - パス入力や階層移動を Finder よりわかりやすくする
 - 業務ファイル管理でよく使うコピー、移動、リネーム、詳細表示を読みやすくする
 - NAS、SFTP、S3、クラウドストレージを左メニューから扱いやすくする
-- Terminal、iTerm、JetBrains IDE、VSCode と連携しやすくする
+- Terminal、iTerm、IDE、エディタなどの外部ツールと連携しやすくする
 - 日本語/英語の表示に対応し、通常は OS の言語設定に従う
 
 ## 主な機能
@@ -29,7 +29,9 @@ Mihako は Swift / SwiftUI / AppKit で作っている macOS アプリです。S
 - Locations に Google Drive、OneDrive、SharePoint、マウント済みボリューム、NAS などを表示
 - SMB、SFTP、S3 接続
 - SFTP 上のフォルダを Terminal / iTerm で開く
-- 選択フォルダを WebStorm、PyCharm、VSCode で開く
+- 選択フォルダを WebStorm、PyCharm、VSCode などの外部アプリで開く
+- 外部ツールボタンの追加、変更、削除、並び替え
+- 外部ツールボタンに起動先アプリのアイコン、または任意の SF Symbol を表示
 - 日本語/英語の表示切り替え
 
 ## 必要なもの
@@ -124,9 +126,44 @@ cp -R .build/release/Mihako.app /Applications/
 - 削除
 - AirDrop
 - Terminal / iTerm で開く
-- WebStorm / PyCharm / VSCode で開く
+- WebStorm / PyCharm / VSCode など登録済み外部ツールで開く
+- 外部ツール設定を開く
 
 ファイルやフォルダはクリックで選択できます。Shift+クリックで範囲選択、Command+クリックで追加選択または選択解除ができます。
+
+## 外部ツール設定
+
+ファイル一覧の上部にある歯車ボタン、またはメニューバーの `External Tools...` から外部ツールを設定できます。
+
+初期状態では次のツールが登録されています。
+
+- Terminal: 現在表示しているフォルダを Terminal で開く
+- iTerm: 現在表示しているフォルダを iTerm で開く
+- WebStorm: 選択中のフォルダを WebStorm で開く
+- PyCharm: 選択中のフォルダを PyCharm で開く
+- VSCode: 選択中のフォルダを VSCode で開く
+
+設定画面では、ツールの追加、削除、名前変更、並び替え、アイコン変更ができます。
+
+`Tool Type` は次から選びます。
+
+- `Terminal`: macOS 標準の Terminal で開く
+- `iTerm`: iTerm で開く
+- `Application`: 指定したアプリでフォルダを開く
+
+`Open Target` は次から選びます。
+
+- `Current Folder`: 現在表示しているフォルダを開く
+- `Selected Folder`: ファイル一覧で選択しているフォルダを開く
+
+`Icon` は次から選びます。
+
+- `Application Icon`: 起動先アプリのアイコンを表示する
+- `SF Symbol`: `terminal`、`hammer`、`chevron.left.forwardslash.chevron.right` などの SF Symbol 名を指定して表示する
+
+`Application` タイプでは `Choose Application...` から `.app` を選ぶのが簡単です。選択すると、アプリのパスと Bundle ID が自動で入ります。アプリが移動された場合に備えて、Bundle ID が分かるアプリは Bundle ID でも探します。
+
+外部ツール設定は UserDefaults に保存されます。壊れた場合や初期状態に戻したい場合は、設定画面の `Restore Defaults` を押してください。
 
 ## キーボードショートカット
 

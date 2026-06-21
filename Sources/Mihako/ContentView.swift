@@ -68,6 +68,10 @@ struct ContentView: View {
             ConnectServerSheet()
                 .environmentObject(browser)
         }
+        .sheet(isPresented: $browser.isExternalToolsSettingsPresented) {
+            ExternalToolsSettingsSheet()
+                .environmentObject(browser)
+        }
         .sheet(item: $browser.renameRequest) { request in
             RenameSheet(
                 request: request,
@@ -675,40 +679,381 @@ struct FileActionBarView: View {
             }
             .disabled(browser.selectedIDs.isEmpty)
 
-            ToolbarIconButton(systemImageName: "terminal", help: "Open in Terminal") {
-                browser.openInTerminal(browser.currentURL)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(browser.externalTools) { tool in
+                        ExternalToolToolbarButton(tool: tool)
+                    }
+                }
             }
-            .disabled(browser.isCurrentS3)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            ToolbarIconButton(systemImageName: "terminal.fill", help: "Open in iTerm") {
-                browser.openIniTerm(browser.currentURL)
+            ToolbarIconButton(systemImageName: "gearshape", help: "Configure External Tools") {
+                browser.showExternalToolsSettings()
             }
-            .disabled(!browser.isITermAvailable || browser.isCurrentS3)
-
-            Divider()
-                .frame(height: 22)
-
-            ToolbarIconButton(systemImageName: "globe", help: "Open selected folder in WebStorm") {
-                browser.openSelectedFolderInWebStorm()
-            }
-            .disabled(!browser.canOpenSelectedFolderInWebStorm)
-
-            ToolbarIconButton(systemImageName: "hammer", help: "Open selected folder in PyCharm") {
-                browser.openSelectedFolderInPyCharm()
-            }
-            .disabled(!browser.canOpenSelectedFolderInPyCharm)
-
-            ToolbarIconButton(systemImageName: "chevron.left.forwardslash.chevron.right", help: "Open selected folder in VSCode") {
-                browser.openSelectedFolderInVSCode()
-            }
-            .disabled(!browser.canOpenSelectedFolderInVSCode)
-
-            Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .frame(height: 42)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct ExternalToolToolbarButton: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    let tool: ExternalTool
+
+    var body: some View {
+        Button {
+            browser.openExternalTool(tool)
+        } label: {
+            ExternalToolIconView(tool: tool, size: 18) {
+                browser.applicationIcon(for: tool)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .help(String(format: L10n.string("Open with %@"), tool.title))
+        .disabled(!browser.canOpenExternalTool(tool))
+    }
+}
+
+struct ExternalToolIconView: View {
+    let tool: ExternalTool
+    let size: CGFloat
+    let applicationIcon: () -> NSImage?
+
+    var body: some View {
+        if let icon = applicationIcon() {
+            Image(nsImage: icon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: tool.systemImageName)
+                .frame(width: size, height: size)
+        }
+    }
+}
+
+struct ExternalToolsSettingsSheet: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var tools: [ExternalTool] = []
+    @State private var selectedToolID: UUID?
+
+    private var selectedIndex: Int? {
+        guard let selectedToolID else {
+            return nil
+        }
+
+        return tools.firstIndex { $0.id == selectedToolID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(L10n.string("External Tools"))
+                .font(.title3.weight(.semibold))
+
+            HStack(alignment: .top, spacing: 14) {
+                VStack(spacing: 8) {
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(tools) { tool in
+                                Button {
+                                    selectedToolID = tool.id
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        ExternalToolIconView(tool: tool, size: 18) {
+                                            applicationIcon(for: tool)
+                                        }
+
+                                        Text(tool.title)
+                                            .lineLimit(1)
+
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(selectedToolID == tool.id ? Color.accentColor.opacity(0.18) : Color.clear)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .frame(width: 220, height: 310)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+
+                    HStack(spacing: 6) {
+                        ToolbarIconButton(systemImageName: "plus", help: "Add Application Tool") {
+                            addApplicationTool()
+                        }
+
+                        ToolbarIconButton(systemImageName: "terminal", help: "Add Terminal Tool") {
+                            addTerminalTool()
+                        }
+
+                        ToolbarIconButton(systemImageName: "arrow.up", help: "Move Up") {
+                            moveSelectedTool(offset: -1)
+                        }
+                        .disabled(selectedIndex == nil || selectedIndex == 0)
+
+                        ToolbarIconButton(systemImageName: "arrow.down", help: "Move Down") {
+                            moveSelectedTool(offset: 1)
+                        }
+                        .disabled(selectedIndex == nil || selectedIndex == tools.count - 1)
+
+                        ToolbarIconButton(systemImageName: "trash", help: "Delete Tool") {
+                            deleteSelectedTool()
+                        }
+                        .disabled(selectedIndex == nil)
+                    }
+                }
+
+                Divider()
+                    .frame(height: 350)
+
+                if let selectedIndex {
+                    ExternalToolEditorView(tool: $tools[selectedIndex])
+                        .frame(width: 390, alignment: .topLeading)
+                } else {
+                    Text(L10n.string("Select a tool to edit."))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 390, height: 320, alignment: .center)
+                }
+            }
+
+            HStack {
+                Button(L10n.string("Restore Defaults")) {
+                    tools = ExternalTool.defaultTools
+                    selectedToolID = tools.first?.id
+                }
+
+                Spacer()
+
+                Button(L10n.string("Cancel")) {
+                    dismiss()
+                }
+
+                Button(L10n.string("Save")) {
+                    browser.saveExternalTools(tools)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 690)
+        .onAppear {
+            tools = browser.externalTools
+            selectedToolID = tools.first?.id
+        }
+    }
+
+    private func addApplicationTool() {
+        let tool = ExternalTool(
+            title: L10n.string("New Tool"),
+            systemImageName: "app",
+            iconMode: .applicationIcon,
+            kind: .application,
+            target: .selectedFolder
+        )
+        tools.append(tool)
+        selectedToolID = tool.id
+    }
+
+    private func addTerminalTool() {
+        let tool = ExternalTool(
+            title: "Terminal",
+            systemImageName: "terminal",
+            iconMode: .applicationIcon,
+            kind: .terminal,
+            target: .currentFolder
+        )
+        tools.append(tool)
+        selectedToolID = tool.id
+    }
+
+    private func deleteSelectedTool() {
+        guard let selectedIndex else {
+            return
+        }
+
+        tools.remove(at: selectedIndex)
+        selectedToolID = tools.indices.contains(selectedIndex)
+            ? tools[selectedIndex].id
+            : tools.last?.id
+    }
+
+    private func moveSelectedTool(offset: Int) {
+        guard let selectedIndex else {
+            return
+        }
+
+        let destinationIndex = selectedIndex + offset
+        guard tools.indices.contains(destinationIndex) else {
+            return
+        }
+
+        tools.swapAt(selectedIndex, destinationIndex)
+    }
+
+    private func applicationIcon(for tool: ExternalTool) -> NSImage? {
+        guard tool.iconMode == .applicationIcon else {
+            return nil
+        }
+
+        if let applicationPath = tool.applicationPath,
+           FileManager.default.fileExists(atPath: applicationPath) {
+            return NSWorkspace.shared.icon(forFile: applicationPath)
+        }
+
+        switch tool.kind {
+        case .terminal:
+            let terminalURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+                ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+            return NSWorkspace.shared.icon(forFile: terminalURL.path)
+        case .iTerm:
+            if let iTermURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2") {
+                return NSWorkspace.shared.icon(forFile: iTermURL.path)
+            }
+        case .application:
+            break
+        }
+
+        for bundleIdentifier in tool.bundleIdentifiers {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+                return NSWorkspace.shared.icon(forFile: url.path)
+            }
+        }
+
+        return nil
+    }
+}
+
+struct ExternalToolEditorView: View {
+    @Binding var tool: ExternalTool
+
+    private var bundleIdentifiersText: Binding<String> {
+        Binding(
+            get: {
+                tool.bundleIdentifiers.joined(separator: ", ")
+            },
+            set: { newValue in
+                tool.bundleIdentifiers = newValue
+                    .split { character in
+                        character == "," || character == " " || character == "\n"
+                    }
+                    .map(String.init)
+            }
+        )
+    }
+
+    private var applicationPathText: Binding<String> {
+        Binding(
+            get: {
+                tool.applicationPath ?? ""
+            },
+            set: { newValue in
+                tool.applicationPath = newValue.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent(L10n.string("Name")) {
+                TextField(L10n.string("Name"), text: $tool.title)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent(L10n.string("Tool Type")) {
+                Picker(L10n.string("Tool Type"), selection: $tool.kind) {
+                    ForEach(ExternalToolKind.allCases) { kind in
+                        Text(L10n.string(kind.titleKey)).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+
+            LabeledContent(L10n.string("Open Target")) {
+                Picker(L10n.string("Open Target"), selection: $tool.target) {
+                    ForEach(ExternalToolTarget.allCases) { target in
+                        Text(L10n.string(target.titleKey)).tag(target)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+
+            LabeledContent(L10n.string("Icon")) {
+                Picker(L10n.string("Icon"), selection: $tool.iconMode) {
+                    ForEach(ExternalToolIconMode.allCases) { mode in
+                        Text(L10n.string(mode.titleKey)).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+
+            LabeledContent(L10n.string("SF Symbol")) {
+                TextField(L10n.string("SF Symbol"), text: $tool.systemImageName)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if tool.kind == .application {
+                LabeledContent(L10n.string("Bundle identifiers")) {
+                    TextField("com.example.App", text: bundleIdentifiersText)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                LabeledContent(L10n.string("Application path")) {
+                    TextField("/Applications/App.app", text: applicationPathText)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Button(L10n.string("Choose Application...")) {
+                    chooseApplication()
+                }
+            }
+        }
+    }
+
+    private func chooseApplication() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        tool.applicationPath = url.path
+
+        if let bundle = Bundle(url: url) {
+            if let bundleIdentifier = bundle.bundleIdentifier {
+                tool.bundleIdentifiers = [bundleIdentifier]
+            }
+
+            let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+
+            if let displayName = displayName?.nilIfEmpty,
+               tool.title == L10n.string("New Tool") || tool.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                tool.title = displayName
+            }
+        }
+
+        tool.iconMode = .applicationIcon
     }
 }
 
@@ -862,7 +1207,7 @@ struct FileIconCell: View {
 
     var body: some View {
         VStack(spacing: 7) {
-            FileSystemIcon(url: item.url, size: 46)
+            FileSystemIcon(item: item, size: 46)
                 .frame(width: 52, height: 46)
 
             Text(item.displayName)
@@ -888,14 +1233,23 @@ struct FileIconCell: View {
 }
 
 struct FileSystemIcon: View {
-    let url: URL
+    let item: FileItem
     let size: CGFloat
 
     var body: some View {
-        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: size, height: size)
+        if SFTPClient.isSFTPURL(item.url) || S3Client.isS3URL(item.url) {
+            Image(systemName: item.systemImageName)
+                .resizable()
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(item.isDirectory ? Color.accentColor : Color.secondary)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+        } else {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+        }
     }
 }
 
@@ -954,7 +1308,7 @@ struct FileRow: View {
     var body: some View {
         HStack(spacing: 0) {
             HStack(spacing: 8) {
-                FileSystemIcon(url: item.url, size: 20)
+                FileSystemIcon(item: item, size: 20)
 
                 Text(item.displayName)
                     .lineLimit(1)
@@ -1091,6 +1445,12 @@ struct FolderContextMenu: View {
             browser.revealInFinder(browser.currentURL)
         }
         .disabled(browser.isCurrentRemote)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

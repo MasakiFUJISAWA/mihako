@@ -121,6 +121,171 @@ enum RemoteConnectionKind: String, CaseIterable, Codable, Hashable, Identifiable
     }
 }
 
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
+enum ExternalToolKind: String, CaseIterable, Codable, Hashable, Identifiable {
+    case terminal
+    case iTerm
+    case application
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .terminal:
+            return "Terminal"
+        case .iTerm:
+            return "iTerm"
+        case .application:
+            return "Application"
+        }
+    }
+}
+
+enum ExternalToolTarget: String, CaseIterable, Codable, Hashable, Identifiable {
+    case currentFolder
+    case selectedFolder
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .currentFolder:
+            return "Current Folder"
+        case .selectedFolder:
+            return "Selected Folder"
+        }
+    }
+}
+
+enum ExternalToolIconMode: String, CaseIterable, Codable, Hashable, Identifiable {
+    case applicationIcon
+    case symbol
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .applicationIcon:
+            return "Application Icon"
+        case .symbol:
+            return "SF Symbol"
+        }
+    }
+}
+
+struct ExternalTool: Identifiable, Codable, Hashable {
+    var id: UUID
+    var title: String
+    var systemImageName: String
+    var iconMode: ExternalToolIconMode
+    var kind: ExternalToolKind
+    var target: ExternalToolTarget
+    var bundleIdentifiers: [String]
+    var applicationPath: String?
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        systemImageName: String,
+        iconMode: ExternalToolIconMode = .applicationIcon,
+        kind: ExternalToolKind,
+        target: ExternalToolTarget,
+        bundleIdentifiers: [String] = [],
+        applicationPath: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.systemImageName = systemImageName
+        self.iconMode = iconMode
+        self.kind = kind
+        self.target = target
+        self.bundleIdentifiers = bundleIdentifiers
+        self.applicationPath = applicationPath
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case systemImageName
+        case iconMode
+        case kind
+        case target
+        case bundleIdentifiers
+        case applicationPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decode(String.self, forKey: .title)
+        systemImageName = try container.decode(String.self, forKey: .systemImageName)
+        iconMode = try container.decodeIfPresent(ExternalToolIconMode.self, forKey: .iconMode) ?? .applicationIcon
+        kind = try container.decode(ExternalToolKind.self, forKey: .kind)
+        target = try container.decode(ExternalToolTarget.self, forKey: .target)
+        bundleIdentifiers = try container.decodeIfPresent([String].self, forKey: .bundleIdentifiers) ?? []
+        applicationPath = try container.decodeIfPresent(String.self, forKey: .applicationPath)
+    }
+
+    var normalized: ExternalTool {
+        var copy = self
+        copy.title = title.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? L10n.string(kind.titleKey)
+        copy.systemImageName = systemImageName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "app"
+        copy.bundleIdentifiers = bundleIdentifiers
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        copy.applicationPath = applicationPath?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+        return copy
+    }
+
+    static let defaultTools: [ExternalTool] = [
+        ExternalTool(
+            title: "Terminal",
+            systemImageName: "terminal",
+            iconMode: .applicationIcon,
+            kind: .terminal,
+            target: .currentFolder
+        ),
+        ExternalTool(
+            title: "iTerm",
+            systemImageName: "terminal.fill",
+            iconMode: .applicationIcon,
+            kind: .iTerm,
+            target: .currentFolder
+        ),
+        ExternalTool(
+            title: "WebStorm",
+            systemImageName: "globe",
+            iconMode: .applicationIcon,
+            kind: .application,
+            target: .selectedFolder,
+            bundleIdentifiers: ["com.jetbrains.WebStorm"]
+        ),
+        ExternalTool(
+            title: "PyCharm",
+            systemImageName: "hammer",
+            iconMode: .applicationIcon,
+            kind: .application,
+            target: .selectedFolder,
+            bundleIdentifiers: ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"]
+        ),
+        ExternalTool(
+            title: "VSCode",
+            systemImageName: "chevron.left.forwardslash.chevron.right",
+            iconMode: .applicationIcon,
+            kind: .application,
+            target: .selectedFolder,
+            bundleIdentifiers: ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"]
+        )
+    ]
+}
+
 struct SidebarLocation: Identifiable, Hashable {
     var id: String {
         connectionURL?.absoluteString ?? url.standardizedFileURL.path
