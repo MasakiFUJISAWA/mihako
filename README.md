@@ -53,8 +53,8 @@ Shodana は Swift / SwiftUI / AppKit で作っている macOS アプリです。
 GitHub から clone します。
 
 ```sh
-git clone git@github.com:MasakiFUJISAWA/mihako.git
-cd mihako
+git clone git@github.com:MasakiFUJISAWA/shodana.git
+cd shodana
 ```
 
 すでにリポジトリがある場合は、最新版に更新します。
