@@ -131,6 +131,26 @@ struct RenameRequest: Identifiable {
     let currentName: String
 }
 
+enum GitBranchAction: String, Identifiable {
+    case checkout
+    case merge
+
+    var id: String { rawValue }
+}
+
+struct GitCommitRequest: Identifiable {
+    let id = UUID()
+    let repositoryURL: URL
+    let items: [FileItem]
+}
+
+struct GitBranchRequest: Identifiable {
+    let id = UUID()
+    let repositoryURL: URL
+    let action: GitBranchAction
+    let branches: [String]
+}
+
 enum ShodanaTransferType {
     static let fileURLs = "dev.masakifujisawa.shodana.file-urls"
     static let sftpURL = "dev.masakifujisawa.shodana.sftp-url"

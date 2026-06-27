@@ -19,6 +19,9 @@ final class FileBrowserViewModel: ObservableObject {
     @Published private(set) var sortAscending = true
     @Published var errorMessage: String?
     @Published var renameRequest: RenameRequest?
+    @Published var gitCommitRequest: GitCommitRequest?
+    @Published var gitBranchRequest: GitBranchRequest?
+    @Published private(set) var gitRepositoryInfo: GitRepositoryInfo?
     @Published private(set) var pendingClipboardOperation: FileClipboardOperation?
     @Published private(set) var sidebarSections: [SidebarSection] = []
     @Published var viewMode: BrowserViewMode = .list
@@ -54,6 +57,7 @@ final class FileBrowserViewModel: ObservableObject {
 
     private static let showHiddenFilesDefaultsKey = "Shodana.showHiddenFiles"
     private static let legacyShowHiddenFilesDefaultsKeys = ["Mihako.showHiddenFiles"]
+    private static let gitRemoteCheckIntervalNanoseconds: UInt64 = 60 * 1_000_000_000
 
     private let fileManager = FileManager.default
     private let userFavoritesDefaultsKey = "Shodana.userFavoriteFolders"
@@ -71,6 +75,8 @@ final class FileBrowserViewModel: ObservableObject {
     private var sidebarLocationOrderIDs: [String] = []
     private var remoteReloadTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var gitRepositoryInfoTask: Task<Void, Never>?
+    private var gitRemoteTrackingTask: Task<Void, Never>?
 
     private enum TerminalApp {
         case terminal
@@ -110,7 +116,13 @@ final class FileBrowserViewModel: ObservableObject {
         launcherFolderShortcuts = LauncherFolderShortcutStore.load()
         refreshSidebarLocations()
         reload()
+        startGitRemoteTrackingMonitor()
         reconnectSavedServers()
+    }
+
+    deinit {
+        gitRepositoryInfoTask?.cancel()
+        gitRemoteTrackingTask?.cancel()
     }
 
     var canGoBack: Bool {
@@ -189,6 +201,47 @@ final class FileBrowserViewModel: ObservableObject {
 
     var isCurrentRemote: Bool {
         isCurrentSFTP || isCurrentS3
+    }
+
+    var canUseGit: Bool {
+        gitRepositoryInfo != nil
+    }
+
+    var gitBranchDisplayName: String? {
+        gitRepositoryInfo?.branchName
+    }
+
+    var gitBranchTrackingIndicator: String? {
+        gitRepositoryInfo?.trackingStatus?.indicator
+    }
+
+    var gitBranchTrackingDescription: String? {
+        guard let trackingStatus = gitRepositoryInfo?.trackingStatus,
+              trackingStatus.aheadCount > 0 || trackingStatus.behindCount > 0 else {
+            return nil
+        }
+
+        if trackingStatus.aheadCount > 0, trackingStatus.behindCount > 0 {
+            return L10n.format(
+                "git.tracking.ahead_behind",
+                trackingStatus.aheadCount,
+                trackingStatus.behindCount
+            )
+        }
+
+        if trackingStatus.aheadCount > 0 {
+            return L10n.format("git.tracking.ahead", trackingStatus.aheadCount)
+        }
+
+        return L10n.format("git.tracking.behind", trackingStatus.behindCount)
+    }
+
+    var canGitAddSelection: Bool {
+        gitPaths(for: selectedItems).isEmpty == false
+    }
+
+    var canGitCommitSelection: Bool {
+        canGitAddSelection
     }
 
     var currentDisplayAddress: String {
@@ -270,8 +323,50 @@ final class FileBrowserViewModel: ObservableObject {
         return result
     }
 
+    private func startGitRemoteTrackingMonitor() {
+        gitRemoteTrackingTask?.cancel()
+        gitRemoteTrackingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.gitRemoteCheckIntervalNanoseconds)
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                self?.refreshGitRepositoryInfo(refreshRemote: true)
+            }
+        }
+    }
+
+    private func refreshGitRepositoryInfo(refreshRemote: Bool = false) {
+        if refreshRemote, gitRepositoryInfo == nil {
+            return
+        }
+
+        gitRepositoryInfoTask?.cancel()
+
+        guard !isCurrentRemote else {
+            gitRepositoryInfo = nil
+            return
+        }
+
+        let directoryURL = currentURL
+        gitRepositoryInfoTask = Task { [weak self] in
+            let info = await GitClient.repositoryInfo(for: directoryURL, refreshRemote: refreshRemote)
+
+            await MainActor.run {
+                guard let self, !Task.isCancelled, self.currentURL == directoryURL else {
+                    return
+                }
+
+                self.gitRepositoryInfo = info
+            }
+        }
+    }
+
     func reload() {
         refreshSidebarLocations()
+        refreshGitRepositoryInfo()
 
         if isCurrentSFTP {
             reloadSFTPDirectory()
@@ -1695,6 +1790,12 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func transfer(_ sourceURLs: [URL], into destinationFolder: URL, mode: FileClipboardMode) {
+        let sourceURLs = sourceURLs.filter { canTransfer($0, into: destinationFolder) }
+
+        guard !sourceURLs.isEmpty else {
+            return
+        }
+
         let sftpSources = sourceURLs.filter(SFTPClient.isSFTPURL)
         let s3Sources = sourceURLs.filter(S3Client.isS3URL)
         let remoteSources = sftpSources + s3Sources
@@ -1754,6 +1855,10 @@ final class FileBrowserViewModel: ObservableObject {
 
     private func copyLocalItems(_ sourceURLs: [URL], into destinationFolder: URL, mode: FileClipboardMode) throws {
         for sourceURL in sourceURLs {
+            guard canTransfer(sourceURL, into: destinationFolder) else {
+                continue
+            }
+
             let destinationURL = uniqueDestinationURL(for: sourceURL, in: destinationFolder)
 
             if mode == .cut {
@@ -1764,6 +1869,25 @@ final class FileBrowserViewModel: ObservableObject {
                 try fileManager.copyItem(at: sourceURL, to: destinationURL)
             }
         }
+    }
+
+    private func canTransfer(_ sourceURL: URL, into destinationFolder: URL) -> Bool {
+        guard sourceURL.isFileURL, destinationFolder.isFileURL else {
+            return true
+        }
+
+        let sourcePath = sourceURL.standardizedFileURL.path.trimmingTrailingSlash
+        let destinationPath = destinationFolder.standardizedFileURL.path.trimmingTrailingSlash
+
+        guard !sourcePath.isEmpty, !destinationPath.isEmpty else {
+            return true
+        }
+
+        if sourcePath == destinationPath {
+            return false
+        }
+
+        return !destinationPath.hasPrefix("\(sourcePath)/")
     }
 
     private func removeLocalItemsAfterRemoteMove(_ urls: [URL]) throws {
@@ -1934,6 +2058,260 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         return [item]
+    }
+
+    func canGitAdd(_ item: FileItem) -> Bool {
+        !gitPaths(for: contextualItems(for: item)).isEmpty
+    }
+
+    func canGitCommit(_ item: FileItem) -> Bool {
+        canGitAdd(item)
+    }
+
+    func gitPull() {
+        performGitOperation(
+            action: "Git Pull",
+            successMessage: "Git pull completed."
+        ) { repositoryURL in
+            try await GitClient.pull(in: repositoryURL)
+        }
+    }
+
+    func gitPush() {
+        performGitOperation(
+            action: "Git Push",
+            successMessage: "Git push completed."
+        ) { repositoryURL in
+            try await GitClient.push(in: repositoryURL)
+        }
+    }
+
+    func gitAdd(_ item: FileItem) {
+        gitAdd(items: contextualItems(for: item))
+    }
+
+    func gitAddSelection() {
+        gitAdd(items: selectedItems)
+    }
+
+    func beginGitCommit(_ item: FileItem) {
+        beginGitCommit(items: contextualItems(for: item))
+    }
+
+    func beginGitCommitSelection() {
+        beginGitCommit(items: selectedItems)
+    }
+
+    func cancelGitCommit() {
+        gitCommitRequest = nil
+    }
+
+    func gitCommit(request: GitCommitRequest, message: String) {
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedMessage.isEmpty else {
+            presentMessage(L10n.string("Commit message cannot be empty."))
+            return
+        }
+
+        let paths = gitPaths(for: request.items, in: request.repositoryURL)
+
+        guard !paths.isEmpty else {
+            return
+        }
+
+        Task {
+            do {
+                let output = try await GitClient.commit(
+                    paths: paths,
+                    message: trimmedMessage,
+                    in: request.repositoryURL
+                )
+                gitCommitRequest = nil
+                reload()
+                presentMessage(output.nilIfEmpty ?? L10n.string("Git commit completed."))
+            } catch {
+                presentError(error, action: "Git Commit")
+            }
+        }
+    }
+
+    func beginGitCheckoutBranch() {
+        beginGitBranchAction(.checkout)
+    }
+
+    func beginGitMergeBranch() {
+        beginGitBranchAction(.merge)
+    }
+
+    func cancelGitBranchRequest() {
+        gitBranchRequest = nil
+    }
+
+    func gitBranch(request: GitBranchRequest, branchName: String) {
+        let trimmedBranchName = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedBranchName.isEmpty else {
+            return
+        }
+
+        gitBranchRequest = nil
+
+        switch request.action {
+        case .checkout:
+            performGitOperation(
+                repositoryURL: request.repositoryURL,
+                action: "Git Checkout",
+                successMessage: "Git checkout completed."
+            ) { repositoryURL in
+                try await GitClient.checkout(branchName: trimmedBranchName, in: repositoryURL)
+            }
+        case .merge:
+            performGitOperation(
+                repositoryURL: request.repositoryURL,
+                action: "Git Merge",
+                successMessage: "Git merge completed."
+            ) { repositoryURL in
+                try await GitClient.merge(branchName: trimmedBranchName, in: repositoryURL)
+            }
+        }
+    }
+
+    private func gitAdd(items: [FileItem]) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return
+        }
+
+        let paths = gitPaths(for: items, in: repositoryURL)
+
+        guard !paths.isEmpty else {
+            return
+        }
+
+        Task {
+            do {
+                let output = try await GitClient.add(paths: paths, in: repositoryURL)
+                reload()
+                presentMessage(output.nilIfEmpty ?? L10n.string("Git add completed."))
+            } catch {
+                presentError(error, action: "Git Add")
+            }
+        }
+    }
+
+    private func beginGitCommit(items: [FileItem]) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL,
+              !gitPaths(for: items, in: repositoryURL).isEmpty else {
+            return
+        }
+
+        gitCommitRequest = GitCommitRequest(repositoryURL: repositoryURL, items: items)
+    }
+
+    private func beginGitBranchAction(_ action: GitBranchAction) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return
+        }
+
+        let currentBranch = gitRepositoryInfo?.branchName
+
+        Task {
+            do {
+                let branches = try await GitClient.branchNames(in: repositoryURL)
+                    .filter { $0 != currentBranch }
+
+                guard !branches.isEmpty else {
+                    presentMessage(L10n.string("No branches available."))
+                    return
+                }
+
+                gitBranchRequest = GitBranchRequest(
+                    repositoryURL: repositoryURL,
+                    action: action,
+                    branches: branches
+                )
+            } catch {
+                presentError(error, action: "Load Git branches")
+            }
+        }
+    }
+
+    private func performGitOperation(
+        action: String,
+        successMessage: String,
+        operation: @escaping (URL) async throws -> String
+    ) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return
+        }
+
+        performGitOperation(
+            repositoryURL: repositoryURL,
+            action: action,
+            successMessage: successMessage,
+            operation: operation
+        )
+    }
+
+    private func performGitOperation(
+        repositoryURL: URL,
+        action: String,
+        successMessage: String,
+        operation: @escaping (URL) async throws -> String
+    ) {
+        Task {
+            do {
+                let output = try await operation(repositoryURL)
+                reload()
+                presentMessage(output.nilIfEmpty ?? L10n.string(successMessage))
+            } catch {
+                presentError(error, action: action)
+            }
+        }
+    }
+
+    private func gitPaths(for items: [FileItem]) -> [String] {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return []
+        }
+
+        return gitPaths(for: items, in: repositoryURL)
+    }
+
+    private func gitPaths(for items: [FileItem], in repositoryURL: URL) -> [String] {
+        var seenPaths = Set<String>()
+
+        return items.compactMap { item in
+            repositoryRelativePath(for: item.url, repositoryURL: repositoryURL)
+        }
+        .filter { path in
+            seenPaths.insert(path).inserted
+        }
+    }
+
+    private func repositoryRelativePath(for url: URL, repositoryURL: URL) -> String? {
+        guard url.isFileURL else {
+            return nil
+        }
+
+        let targetPath = url.standardizedFileURL.path
+        let repositoryPath = repositoryURL.standardizedFileURL.path
+
+        if targetPath == repositoryPath {
+            return "."
+        }
+
+        if repositoryPath == "/" {
+            return String(targetPath.dropFirst()).nilIfEmpty
+        }
+
+        let repositoryPrefix = repositoryPath.hasSuffix("/") ? repositoryPath : "\(repositoryPath)/"
+
+        guard targetPath.hasPrefix(repositoryPrefix) else {
+            return nil
+        }
+
+        return String(targetPath.dropFirst(repositoryPrefix.count)).nilIfEmpty
     }
 
     private func commonParentDirectory(for urls: [URL]) -> URL? {
@@ -3497,8 +3875,8 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func uniqueDestinationURL(for sourceURL: URL, in destinationFolder: URL) -> URL {
-        let filename = sourceURL.lastPathComponent
-        let pathExtension = sourceURL.pathExtension
+        let filename = filenameForCopyDestination(from: sourceURL)
+        let pathExtension = pathExtensionForCopyDestination(from: sourceURL, filename: filename)
         let baseName: String
 
         if pathExtension.isEmpty {
@@ -3513,6 +3891,26 @@ final class FileBrowserViewModel: ObservableObject {
             pathExtension: pathExtension,
             copyStyle: true
         )
+    }
+
+    private func filenameForCopyDestination(from sourceURL: URL) -> String {
+        let pathName = URL(fileURLWithPath: sourceURL.path.trimmingTrailingSlash).lastPathComponent
+            .trimmingTrailingSlash
+        let fallbackName = sourceURL.lastPathComponent.trimmingTrailingSlash
+
+        return pathName.nilIfEmpty
+            ?? fallbackName.nilIfEmpty
+            ?? L10n.string("Untitled")
+    }
+
+    private func pathExtensionForCopyDestination(from sourceURL: URL, filename: String) -> String {
+        let values = try? sourceURL.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+
+        if values?.isDirectory == true, values?.isPackage != true {
+            return ""
+        }
+
+        return (filename as NSString).pathExtension
     }
 
     private func uniqueRemoteURL(

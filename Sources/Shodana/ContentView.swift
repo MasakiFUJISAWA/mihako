@@ -92,6 +92,28 @@ struct ContentView: View {
                 }
             )
         }
+        .sheet(item: $browser.gitCommitRequest) { request in
+            GitCommitSheet(
+                request: request,
+                onCommit: { message in
+                    browser.gitCommit(request: request, message: message)
+                },
+                onCancel: {
+                    browser.cancelGitCommit()
+                }
+            )
+        }
+        .sheet(item: $browser.gitBranchRequest) { request in
+            GitBranchSheet(
+                request: request,
+                onSelect: { branchName in
+                    browser.gitBranch(request: request, branchName: branchName)
+                },
+                onCancel: {
+                    browser.cancelGitBranchRequest()
+                }
+            )
+        }
         .alert(
             L10n.string("Action Failed"),
             isPresented: Binding(
@@ -2055,6 +2077,7 @@ final class FileDragInteractionNSView: NSView, NSDraggingSource {
 
     private var mouseDownEvent: NSEvent?
     private var didStartDrag = false
+    private let dragStartThreshold: CGFloat = 4
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         switch NSApp.currentEvent?.type {
@@ -2102,6 +2125,14 @@ final class FileDragInteractionNSView: NSView, NSDraggingSource {
               let browser,
               let item,
               let mouseDownEvent else {
+            return
+        }
+
+        let deltaX = event.locationInWindow.x - mouseDownEvent.locationInWindow.x
+        let deltaY = event.locationInWindow.y - mouseDownEvent.locationInWindow.y
+        let draggedDistance = hypot(deltaX, deltaY)
+
+        guard draggedDistance >= dragStartThreshold else {
             return
         }
 
@@ -2366,6 +2397,11 @@ struct FileContextMenu: View {
         }
         .disabled(!browser.isITermAvailable || S3Client.isS3URL(item.url))
 
+        if browser.canUseGit {
+            Divider()
+            GitItemContextMenu(item: item)
+        }
+
         Divider()
 
         Button(L10n.string("Move to Trash")) {
@@ -2393,6 +2429,11 @@ struct FolderContextMenu: View {
             browser.pasteIntoCurrentFolder()
         }
 
+        if browser.canUseGit {
+            Divider()
+            GitFolderContextMenu()
+        }
+
         Divider()
 
         Button(L10n.string("Open in Terminal")) {
@@ -2415,6 +2456,84 @@ struct FolderContextMenu: View {
             browser.revealInFinder(browser.currentURL)
         }
         .disabled(browser.isCurrentRemote)
+    }
+}
+
+struct GitItemContextMenu: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    let item: FileItem
+
+    var body: some View {
+        Menu(L10n.string("Git")) {
+            Button(L10n.string("Git Pull")) {
+                browser.gitPull()
+            }
+
+            Button(L10n.string("Git Push")) {
+                browser.gitPush()
+            }
+
+            Divider()
+
+            Button(L10n.string("Git Add Selected")) {
+                browser.gitAdd(item)
+            }
+            .disabled(!browser.canGitAdd(item))
+
+            Button(L10n.string("Git Commit Selected...")) {
+                browser.beginGitCommit(item)
+            }
+            .disabled(!browser.canGitCommit(item))
+
+            Divider()
+
+            Button(L10n.string("Checkout Branch...")) {
+                browser.beginGitCheckoutBranch()
+            }
+
+            Button(L10n.string("Merge Branch...")) {
+                browser.beginGitMergeBranch()
+            }
+        }
+    }
+}
+
+struct GitFolderContextMenu: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    var body: some View {
+        Menu(L10n.string("Git")) {
+            Button(L10n.string("Git Pull")) {
+                browser.gitPull()
+            }
+
+            Button(L10n.string("Git Push")) {
+                browser.gitPush()
+            }
+
+            Divider()
+
+            Button(L10n.string("Git Add Selected")) {
+                browser.gitAddSelection()
+            }
+            .disabled(!browser.canGitAddSelection)
+
+            Button(L10n.string("Git Commit Selected...")) {
+                browser.beginGitCommitSelection()
+            }
+            .disabled(!browser.canGitCommitSelection)
+
+            Divider()
+
+            Button(L10n.string("Checkout Branch...")) {
+                browser.beginGitCheckoutBranch()
+            }
+
+            Button(L10n.string("Merge Branch...")) {
+                browser.beginGitMergeBranch()
+            }
+        }
     }
 }
 
@@ -2570,6 +2689,10 @@ struct StatusBarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if let branchName = browser.gitBranchDisplayName {
+                GitBranchStatusLabel(branchName: branchName)
+            }
+
             Text(L10n.format("items.count", browser.displayedItems.count))
 
             if !browser.selectedIDs.isEmpty {
@@ -2592,6 +2715,175 @@ struct StatusBarView: View {
         .padding(.horizontal, 12)
         .frame(height: 26)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct GitBranchStatusLabel: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    let branchName: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .foregroundStyle(.secondary)
+
+            Text(branchName)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(.secondary)
+
+            if let indicator = browser.gitBranchTrackingIndicator {
+                Text(indicator)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(indicatorColor)
+                    .help(browser.gitBranchTrackingDescription ?? "")
+            }
+        }
+        .frame(maxWidth: 210, alignment: .leading)
+    }
+
+    private var indicatorColor: Color {
+        guard let trackingStatus = browser.gitRepositoryInfo?.trackingStatus else {
+            return Color.accentColor
+        }
+
+        if trackingStatus.aheadCount > 0, trackingStatus.behindCount > 0 {
+            return .orange
+        }
+
+        if trackingStatus.aheadCount > 0 {
+            return .green
+        }
+
+        if trackingStatus.behindCount > 0 {
+            return .red
+        }
+
+        return Color.accentColor
+    }
+}
+
+struct GitCommitSheet: View {
+    let request: GitCommitRequest
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var message = ""
+    @FocusState private var isFocused: Bool
+
+    private var trimmedMessage: String {
+        message.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L10n.string("Git Commit"))
+                .font(.headline)
+
+            Text(L10n.format("git.commit.items", request.items.count))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField(L10n.string("Commit message"), text: $message)
+                .textFieldStyle(.roundedBorder)
+                .focused($isFocused)
+                .onSubmit {
+                    guard !trimmedMessage.isEmpty else {
+                        return
+                    }
+
+                    onCommit(message)
+                }
+
+            HStack {
+                Spacer()
+
+                Button(L10n.string("Cancel")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(L10n.string("Commit")) {
+                    onCommit(message)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedMessage.isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .onAppear {
+            isFocused = true
+        }
+    }
+}
+
+struct GitBranchSheet: View {
+    let request: GitBranchRequest
+    let onSelect: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var selectedBranch: String
+
+    init(
+        request: GitBranchRequest,
+        onSelect: @escaping (String) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.request = request
+        self.onSelect = onSelect
+        self.onCancel = onCancel
+        _selectedBranch = State(initialValue: request.branches.first ?? "")
+    }
+
+    private var titleKey: String {
+        switch request.action {
+        case .checkout:
+            return "Checkout Branch"
+        case .merge:
+            return "Merge Branch"
+        }
+    }
+
+    private var buttonTitleKey: String {
+        switch request.action {
+        case .checkout:
+            return "Checkout"
+        case .merge:
+            return "Merge"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L10n.string(titleKey))
+                .font(.headline)
+
+            Picker(L10n.string("Branch"), selection: $selectedBranch) {
+                ForEach(request.branches, id: \.self) { branch in
+                    Text(branch).tag(branch)
+                }
+            }
+            .pickerStyle(.menu)
+
+            HStack {
+                Spacer()
+
+                Button(L10n.string("Cancel")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(L10n.string(buttonTitleKey)) {
+                    onSelect(selectedBranch)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(selectedBranch.isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 380)
     }
 }
 
