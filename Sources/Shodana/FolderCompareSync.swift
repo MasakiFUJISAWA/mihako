@@ -886,7 +886,7 @@ enum FolderCompareSyncEngine {
         }
     }
 
-    private static func copy(source: FolderSnapshotEntry, destinationURL: URL) async throws {
+    static func copy(source: FolderSnapshotEntry, destinationURL: URL) async throws {
         if source.isDirectory && !source.isPackage {
             try await createDirectory(at: destinationURL)
             return
@@ -1229,13 +1229,24 @@ struct FolderCompareSyncSheet: View {
 
             Divider()
 
-            resultArea
+            VSplitView {
+                resultArea
+                    .frame(minHeight: 260, maxHeight: .infinity)
 
-            Divider()
-
-            syncControls
+                syncControls
+                    .frame(minHeight: 170, maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 980, minHeight: 680)
+        .frame(
+            minWidth: 980,
+            idealWidth: 1180,
+            maxWidth: .infinity,
+            minHeight: 680,
+            idealHeight: 820,
+            maxHeight: .infinity
+        )
+        .background(ResizableSheetWindowConfigurator(minSize: NSSize(width: 980, height: 680)))
         .sheet(item: $selectedDetailEntry) { entry in
             FolderCompareDetailSheet(entry: entry)
         }
@@ -1524,10 +1535,36 @@ struct FolderCompareSyncSheet: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 90)
+                .frame(minHeight: 80, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(14)
+    }
+}
+
+private struct ResizableSheetWindowConfigurator: NSViewRepresentable {
+    let minSize: NSSize
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        configureAsync(from: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        configureAsync(from: nsView)
+    }
+
+    private func configureAsync(from view: NSView) {
+        DispatchQueue.main.async {
+            guard let window = view.window else {
+                return
+            }
+
+            window.styleMask.insert(.resizable)
+            window.minSize = minSize
+        }
     }
 }
 
@@ -1628,51 +1665,177 @@ private struct FolderCompareDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var leftContent: FolderComparePreviewContent = .loading
     @State private var rightContent: FolderComparePreviewContent = .loading
+    @State private var mergeRows: [FolderCompareMergeRow] = []
+    @State private var isApplyingAction = false
+    @State private var actionMessage: String?
+    @State private var actionError: String?
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.string("File Compare"))
-                        .font(.headline)
+            header
 
-                    Text(entry.displayPath)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            Divider()
+
+            if hasTextComparison {
+                mergeEditor
+            } else {
+                sideBySidePreview
+            }
+        }
+        .frame(
+            minWidth: 980,
+            idealWidth: 1180,
+            maxWidth: .infinity,
+            minHeight: 620,
+            idealHeight: 760,
+            maxHeight: .infinity
+        )
+        .background(ResizableSheetWindowConfigurator(minSize: NSSize(width: 980, height: 620)))
+        .task(id: entry.id) {
+            await load()
+        }
+        .alert(
+            L10n.string("Action Failed"),
+            isPresented: Binding(
+                get: { actionError != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        actionError = nil
+                    }
                 }
+            )
+        ) {
+            Button(L10n.string("OK")) {
+                actionError = nil
+            }
+        } message: {
+            Text(actionError ?? "")
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.string("File Compare"))
+                    .font(.headline)
+
+                Text(entry.displayPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            if isApplyingAction {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if let actionMessage {
+                Text(actionMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Button(L10n.string("Use Left")) {
+                copy(source: entry.left, destination: entry.right, successKey: "Left version applied.")
+            }
+            .disabled(!canCopy(source: entry.left, destination: entry.right) || isApplyingAction)
+
+            Button(L10n.string("Use Right")) {
+                copy(source: entry.right, destination: entry.left, successKey: "Right version applied.")
+            }
+            .disabled(!canCopy(source: entry.right, destination: entry.left) || isApplyingAction)
+
+            Button(L10n.string("Skip")) {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(14)
+    }
+
+    private var sideBySidePreview: some View {
+        HStack(spacing: 0) {
+            FolderComparePreviewPane(
+                title: "Left",
+                snapshot: entry.left,
+                content: leftContent
+            )
+
+            Divider()
+
+            FolderComparePreviewPane(
+                title: "Right",
+                snapshot: entry.right,
+                content: rightContent
+            )
+        }
+    }
+
+    private var mergeEditor: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(L10n.string("Line Merge"))
+                    .font(.subheadline.weight(.semibold))
+
+                Text(String(format: L10n.string("%d merge rows"), mergeRows.count))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
-                Button(L10n.string("Close")) {
-                    dismiss()
+                Button(L10n.string("Save to Left")) {
+                    saveMerged(to: [.left])
                 }
-                .keyboardShortcut(.cancelAction)
+                .disabled(!canSaveMerged(to: .left) || isApplyingAction)
+
+                Button(L10n.string("Save to Right")) {
+                    saveMerged(to: [.right])
+                }
+                .disabled(!canSaveMerged(to: .right) || isApplyingAction)
+
+                Button(L10n.string("Save Both")) {
+                    saveMerged(to: [.left, .right])
+                }
+                .disabled(!canSaveMerged(to: .left) || !canSaveMerged(to: .right) || isApplyingAction)
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
 
             Divider()
 
             HStack(spacing: 0) {
-                FolderComparePreviewPane(
-                    title: "Left",
-                    snapshot: entry.left,
-                    content: leftContent
-                )
-
-                Divider()
-
-                FolderComparePreviewPane(
-                    title: "Right",
-                    snapshot: entry.right,
-                    content: rightContent
-                )
+                Text(L10n.string("Line"))
+                    .frame(width: 90, alignment: .leading)
+                Text(L10n.string("Content"))
+                    .frame(minWidth: 340, maxWidth: .infinity, alignment: .leading)
+                Text(L10n.string("Resolution"))
+                    .frame(width: 300, alignment: .leading)
             }
-        }
-        .frame(minWidth: 980, minHeight: 620)
-        .task(id: entry.id) {
-            await load()
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .frame(height: 28)
+            .background(Color(nsColor: .windowBackgroundColor))
+
+            if mergeRows.isEmpty {
+                Spacer()
+                Text(L10n.string("No text lines."))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach($mergeRows) { $row in
+                            FolderCompareMergeRowView(row: $row)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1680,10 +1843,15 @@ private struct FolderCompareDetailSheet: View {
         async let left = loadContent(for: entry.left)
         async let right = loadContent(for: entry.right)
         let values = await (left, right)
+        let rows = FolderCompareLineMerger.rows(
+            leftText: values.0.textValue,
+            rightText: values.1.textValue
+        )
 
         await MainActor.run {
             leftContent = values.0
             rightContent = values.1
+            mergeRows = rows
         }
     }
 
@@ -1763,6 +1931,471 @@ private struct FolderCompareDetailSheet: View {
         let data = (try? handle.read(upToCount: 4096)) ?? Data()
         return !data.contains(0)
     }
+
+    private var hasTextComparison: Bool {
+        leftContent.textValue != nil || rightContent.textValue != nil
+    }
+
+    private func canCopy(source: FolderSnapshotEntry?, destination: FolderSnapshotEntry?) -> Bool {
+        guard let source, let destination else {
+            return false
+        }
+
+        return !source.isDirectory && !destination.isDirectory
+    }
+
+    private func copy(source: FolderSnapshotEntry?, destination: FolderSnapshotEntry?, successKey: String) {
+        guard let source, let destination else {
+            return
+        }
+
+        isApplyingAction = true
+        actionMessage = nil
+        actionError = nil
+
+        Task {
+            do {
+                try await FolderCompareSyncEngine.copy(source: source, destinationURL: destination.url)
+                await load()
+
+                await MainActor.run {
+                    actionMessage = L10n.string(successKey)
+                    isApplyingAction = false
+                }
+            } catch {
+                await MainActor.run {
+                    actionError = error.localizedDescription
+                    isApplyingAction = false
+                }
+            }
+        }
+    }
+
+    private func canSaveMerged(to side: FolderCompareSide) -> Bool {
+        switch side {
+        case .left:
+            return entry.left.map { !$0.isDirectory } ?? false
+        case .right:
+            return entry.right.map { !$0.isDirectory } ?? false
+        }
+    }
+
+    private func saveMerged(to sides: [FolderCompareSide]) {
+        let targets = sides.compactMap { side -> FolderSnapshotEntry? in
+            switch side {
+            case .left:
+                return entry.left
+            case .right:
+                return entry.right
+            }
+        }
+
+        guard !targets.isEmpty else {
+            return
+        }
+
+        let mergedText = FolderCompareLineMerger.mergedText(from: mergeRows)
+        isApplyingAction = true
+        actionMessage = nil
+        actionError = nil
+
+        Task {
+            do {
+                for target in targets {
+                    try await FolderCompareTextWriter.write(mergedText, to: target.url)
+                }
+
+                await load()
+
+                await MainActor.run {
+                    actionMessage = L10n.string("Merged file saved.")
+                    isApplyingAction = false
+                }
+            } catch {
+                await MainActor.run {
+                    actionError = error.localizedDescription
+                    isApplyingAction = false
+                }
+            }
+        }
+    }
+}
+
+private enum FolderCompareSide {
+    case left
+    case right
+}
+
+private enum FolderCompareMergeChoice: String, CaseIterable, Identifiable {
+    case left
+    case right
+    case skip
+    case custom
+
+    var id: String { rawValue }
+
+    var titleKey: String {
+        switch self {
+        case .left:
+            return "Use Left"
+        case .right:
+            return "Use Right"
+        case .skip:
+            return "Use Neither"
+        case .custom:
+            return "Merge"
+        }
+    }
+}
+
+private struct FolderCompareMergeRow: Identifiable, Equatable {
+    let id = UUID()
+    let leftNumber: Int?
+    let rightNumber: Int?
+    let leftLine: String?
+    let rightLine: String?
+    let isDifferent: Bool
+    var choice: FolderCompareMergeChoice
+    var customText: String
+
+    var outputLine: String? {
+        switch choice {
+        case .left:
+            return leftLine
+        case .right:
+            return rightLine
+        case .skip:
+            return nil
+        case .custom:
+            return customText
+        }
+    }
+}
+
+private struct FolderCompareMergeRowView: View {
+    @Binding var row: FolderCompareMergeRow
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(lineReference)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
+                    lineBox(title: "L", text: row.leftLine)
+                    lineBox(title: "R", text: row.rightLine)
+                }
+
+                if row.choice == .custom {
+                    TextField(L10n.string("Merged Line"), text: $row.customText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                }
+            }
+            .frame(minWidth: 340, maxWidth: .infinity, alignment: .leading)
+
+            if row.isDifferent {
+                Picker(L10n.string("Resolution"), selection: $row.choice) {
+                    ForEach(FolderCompareMergeChoice.allCases) { choice in
+                        Text(L10n.string(choice.titleKey)).tag(choice)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 300)
+            } else {
+                Text(L10n.string("Same"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 300, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(row.isDifferent ? Color.yellow.opacity(0.10) : Color.clear)
+    }
+
+    private var lineReference: String {
+        let left = row.leftNumber.map(String.init) ?? "-"
+        let right = row.rightNumber.map(String.init) ?? "-"
+        return "L\(left) / R\(right)"
+    }
+
+    private func lineBox(title: String, text: String?) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(text ?? "-")
+                .font(.system(size: 12, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .padding(6)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+private enum FolderCompareLineMerger {
+    private enum Operation {
+        case same(leftIndex: Int, rightIndex: Int)
+        case leftOnly(Int)
+        case rightOnly(Int)
+    }
+
+    static func rows(leftText: String?, rightText: String?) -> [FolderCompareMergeRow] {
+        guard leftText != nil || rightText != nil else {
+            return []
+        }
+
+        let leftLines = splitLines(leftText ?? "")
+        let rightLines = splitLines(rightText ?? "")
+
+        guard !leftLines.isEmpty || !rightLines.isEmpty else {
+            return []
+        }
+
+        let operations = makeOperations(leftLines: leftLines, rightLines: rightLines)
+        return foldedRows(from: operations, leftLines: leftLines, rightLines: rightLines)
+    }
+
+    static func mergedText(from rows: [FolderCompareMergeRow]) -> String {
+        rows.compactMap(\.outputLine).joined(separator: "\n")
+    }
+
+    private static func splitLines(_ text: String) -> [String] {
+        guard !text.isEmpty else {
+            return []
+        }
+
+        return text.components(separatedBy: "\n")
+    }
+
+    private static func makeOperations(leftLines: [String], rightLines: [String]) -> [Operation] {
+        let comparisonSize = leftLines.count * rightLines.count
+
+        guard comparisonSize <= 1_000_000 else {
+            return zipByIndex(leftCount: leftLines.count, rightCount: rightLines.count)
+        }
+
+        var table = Array(
+            repeating: Array(repeating: 0, count: rightLines.count + 1),
+            count: leftLines.count + 1
+        )
+
+        if !leftLines.isEmpty && !rightLines.isEmpty {
+            for leftIndex in stride(from: leftLines.count - 1, through: 0, by: -1) {
+                for rightIndex in stride(from: rightLines.count - 1, through: 0, by: -1) {
+                    if leftLines[leftIndex] == rightLines[rightIndex] {
+                        table[leftIndex][rightIndex] = table[leftIndex + 1][rightIndex + 1] + 1
+                    } else {
+                        table[leftIndex][rightIndex] = max(
+                            table[leftIndex + 1][rightIndex],
+                            table[leftIndex][rightIndex + 1]
+                        )
+                    }
+                }
+            }
+        }
+
+        var operations: [Operation] = []
+        var leftIndex = 0
+        var rightIndex = 0
+
+        while leftIndex < leftLines.count && rightIndex < rightLines.count {
+            if leftLines[leftIndex] == rightLines[rightIndex] {
+                operations.append(.same(leftIndex: leftIndex, rightIndex: rightIndex))
+                leftIndex += 1
+                rightIndex += 1
+            } else if table[leftIndex + 1][rightIndex] >= table[leftIndex][rightIndex + 1] {
+                operations.append(.leftOnly(leftIndex))
+                leftIndex += 1
+            } else {
+                operations.append(.rightOnly(rightIndex))
+                rightIndex += 1
+            }
+        }
+
+        while leftIndex < leftLines.count {
+            operations.append(.leftOnly(leftIndex))
+            leftIndex += 1
+        }
+
+        while rightIndex < rightLines.count {
+            operations.append(.rightOnly(rightIndex))
+            rightIndex += 1
+        }
+
+        return operations
+    }
+
+    private static func zipByIndex(leftCount: Int, rightCount: Int) -> [Operation] {
+        var operations: [Operation] = []
+        let maxCount = max(leftCount, rightCount)
+
+        for index in 0..<maxCount {
+            switch (index < leftCount, index < rightCount) {
+            case (true, true):
+                operations.append(.same(leftIndex: index, rightIndex: index))
+            case (true, false):
+                operations.append(.leftOnly(index))
+            case (false, true):
+                operations.append(.rightOnly(index))
+            case (false, false):
+                break
+            }
+        }
+
+        return operations
+    }
+
+    private static func foldedRows(
+        from operations: [Operation],
+        leftLines: [String],
+        rightLines: [String]
+    ) -> [FolderCompareMergeRow] {
+        var rows: [FolderCompareMergeRow] = []
+        var index = 0
+
+        while index < operations.count {
+            switch operations[index] {
+            case .same(let leftIndex, let rightIndex):
+                rows.append(
+                    row(
+                        leftIndex: leftIndex,
+                        rightIndex: rightIndex,
+                        leftLines: leftLines,
+                        rightLines: rightLines,
+                        forceDifference: false
+                    )
+                )
+                index += 1
+            case .leftOnly, .rightOnly:
+                let (leftIndexes, rightIndexes, nextIndex) = collectDifferenceRun(
+                    from: operations,
+                    startIndex: index
+                )
+                let maxCount = max(leftIndexes.count, rightIndexes.count)
+
+                for offset in 0..<maxCount {
+                    rows.append(
+                        row(
+                            leftIndex: offset < leftIndexes.count ? leftIndexes[offset] : nil,
+                            rightIndex: offset < rightIndexes.count ? rightIndexes[offset] : nil,
+                            leftLines: leftLines,
+                            rightLines: rightLines,
+                            forceDifference: true
+                        )
+                    )
+                }
+
+                index = nextIndex
+            }
+        }
+
+        return rows
+    }
+
+    private static func collectDifferenceRun(
+        from operations: [Operation],
+        startIndex: Int
+    ) -> (leftIndexes: [Int], rightIndexes: [Int], nextIndex: Int) {
+        var leftIndexes: [Int] = []
+        var rightIndexes: [Int] = []
+        var index = startIndex
+
+        while index < operations.count {
+            switch operations[index] {
+            case .leftOnly(let leftIndex):
+                leftIndexes.append(leftIndex)
+            case .rightOnly(let rightIndex):
+                rightIndexes.append(rightIndex)
+            case .same:
+                return (leftIndexes, rightIndexes, index)
+            }
+
+            index += 1
+        }
+
+        return (leftIndexes, rightIndexes, index)
+    }
+
+    private static func row(
+        leftIndex: Int?,
+        rightIndex: Int?,
+        leftLines: [String],
+        rightLines: [String],
+        forceDifference: Bool
+    ) -> FolderCompareMergeRow {
+        let leftLine = leftIndex.map { leftLines[$0] }
+        let rightLine = rightIndex.map { rightLines[$0] }
+        let isDifferent = forceDifference || leftLine != rightLine
+        let defaultChoice: FolderCompareMergeChoice
+
+        if !isDifferent {
+            defaultChoice = .left
+        } else if leftLine != nil {
+            defaultChoice = .left
+        } else {
+            defaultChoice = .right
+        }
+
+        return FolderCompareMergeRow(
+            leftNumber: leftIndex.map { $0 + 1 },
+            rightNumber: rightIndex.map { $0 + 1 },
+            leftLine: leftLine,
+            rightLine: rightLine,
+            isDifferent: isDifferent,
+            choice: defaultChoice,
+            customText: leftLine ?? rightLine ?? ""
+        )
+    }
+}
+
+private enum FolderCompareTextWriter {
+    static func write(_ text: String, to url: URL) async throws {
+        if url.isFileURL {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ShodanaMergeSave", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let tempFile = tempDirectory.appendingPathComponent(fileName(for: url))
+        try text.write(to: tempFile, atomically: true, encoding: .utf8)
+
+        if SFTPClient.isSFTPURL(url) {
+            try await SFTPClient.upload(localURLs: [tempFile], to: SFTPClient.parentURL(for: url))
+            return
+        }
+
+        if S3Client.isS3URL(url) {
+            try await S3Client.upload(localURLs: [tempFile], to: S3Client.parentURL(for: url))
+            return
+        }
+
+        throw FolderCompareSyncError.unsupportedSync(L10n.string("Unsupported merge destination."))
+    }
+
+    private static func fileName(for url: URL) -> String {
+        let name = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "merged.txt" : name
+    }
 }
 
 private enum FolderComparePreviewContent {
@@ -1772,6 +2405,14 @@ private enum FolderComparePreviewContent {
     case image(NSImage)
     case metadata(String)
     case error(String)
+
+    var textValue: String? {
+        if case .text(let text) = self {
+            return text
+        }
+
+        return nil
+    }
 }
 
 private struct FolderComparePreviewPane: View {
