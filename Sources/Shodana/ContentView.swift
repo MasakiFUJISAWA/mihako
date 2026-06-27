@@ -5,9 +5,14 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var browser: FileBrowserViewModel
+    @StateObject private var secondaryBrowser = FileBrowserViewModel(reconnectSavedServers: false)
     @State private var sidebarWidth: CGFloat = 300
     @State private var pasteboardShortcutMonitor: Any?
     @State private var hostingWindow: NSWindow?
+    @State private var tabs: [BrowserTab] = []
+    @State private var selectedTabID: UUID?
+    @State private var isSwitchingTabs = false
+    @State private var isDualPaneEnabled = false
 
     private let minimumSidebarWidth: CGFloat = 220
     private let preferredMaximumSidebarWidth: CGFloat = 560
@@ -40,19 +45,30 @@ struct ContentView: View {
                 )
 
                 VStack(spacing: 0) {
-                    BrowserToolbarView()
+                    BrowserTabBar(
+                        tabs: tabs,
+                        selectedTabID: selectedTabID,
+                        isDualPaneEnabled: isDualPaneEnabled,
+                        onSelect: selectTab,
+                        onAdd: addTab,
+                        onClose: closeTab,
+                        onToggleDualPane: toggleDualPane
+                    )
 
-                    if browser.contentMode == .folder {
-                        Divider()
-                        BreadcrumbBar()
+                    Divider()
+
+                    if isDualPaneEnabled {
+                        HSplitView {
+                            BrowserPaneView()
+                                .environmentObject(browser)
+
+                            BrowserPaneView()
+                                .environmentObject(secondaryBrowser)
+                        }
+                    } else {
+                        BrowserPaneView()
+                            .environmentObject(browser)
                     }
-
-                    Divider()
-                    FileActionBarView()
-                    Divider()
-                    FileListView()
-                    Divider()
-                    StatusBarView()
                 }
                 .frame(minWidth: minimumFileBrowserWidth, minHeight: minimumFileBrowserHeight)
                 .layoutPriority(1)
@@ -64,88 +80,14 @@ struct ContentView: View {
             WindowReader(window: $hostingWindow)
         }
         .onAppear {
+            initializeTabsIfNeeded()
             installPasteboardShortcutMonitor()
+        }
+        .onChange(of: browser.currentURL) { _, newURL in
+            updateSelectedTab(with: newURL)
         }
         .onDisappear {
             removePasteboardShortcutMonitor()
-        }
-        .sheet(isPresented: $browser.isConnectServerDialogPresented) {
-            ConnectServerSheet()
-                .environmentObject(browser)
-        }
-        .sheet(isPresented: $browser.isExternalToolsSettingsPresented) {
-            ExternalToolsSettingsSheet()
-                .environmentObject(browser)
-        }
-        .sheet(isPresented: $browser.isLauncherFoldersSettingsPresented) {
-            LauncherFoldersSettingsSheet()
-                .environmentObject(browser)
-        }
-        .sheet(item: $browser.renameRequest) { request in
-            RenameSheet(
-                request: request,
-                onCommit: { newName in
-                    browser.rename(url: request.url, to: newName)
-                },
-                onCancel: {
-                    browser.cancelRename()
-                }
-            )
-        }
-        .sheet(item: $browser.fileInfoRequest) { request in
-            FileInfoSheet(
-                request: request,
-                onClose: {
-                    browser.cancelGetInfo()
-                }
-            )
-        }
-        .sheet(item: $browser.gitCommitRequest) { request in
-            GitCommitSheet(
-                request: request,
-                onCommit: { message in
-                    browser.gitCommit(request: request, message: message)
-                },
-                onCancel: {
-                    browser.cancelGitCommit()
-                }
-            )
-        }
-        .sheet(item: $browser.gitBranchRequest) { request in
-            GitBranchSheet(
-                request: request,
-                onSelect: { branchName in
-                    browser.gitBranch(request: request, branchName: branchName)
-                },
-                onCancel: {
-                    browser.cancelGitBranchRequest()
-                }
-            )
-        }
-        .sheet(item: $browser.gitOperationResult) { result in
-            GitOperationResultSheet(
-                result: result,
-                onClose: {
-                    browser.clearGitOperationResult()
-                }
-            )
-        }
-        .alert(
-            browser.alertTitle,
-            isPresented: Binding(
-                get: { browser.errorMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        browser.clearError()
-                    }
-                }
-            )
-        ) {
-            Button(L10n.string("OK")) {
-                browser.clearError()
-            }
-        } message: {
-            Text(browser.errorMessage ?? "")
         }
     }
 
@@ -167,6 +109,69 @@ struct ContentView: View {
                 sidebarWidth = min(max(newValue, minimumSidebarWidth), maximumWidth)
             }
         )
+    }
+
+    private func initializeTabsIfNeeded() {
+        guard tabs.isEmpty else {
+            return
+        }
+
+        let tab = BrowserTab(url: browser.currentURL)
+        tabs = [tab]
+        selectedTabID = tab.id
+    }
+
+    private func updateSelectedTab(with url: URL) {
+        guard !isSwitchingTabs,
+              let selectedTabID,
+              let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else {
+            return
+        }
+
+        tabs[index].url = url
+    }
+
+    private func selectTab(_ tab: BrowserTab) {
+        guard selectedTabID != tab.id else {
+            return
+        }
+
+        isSwitchingTabs = true
+        selectedTabID = tab.id
+        browser.navigate(to: tab.url)
+
+        DispatchQueue.main.async {
+            isSwitchingTabs = false
+        }
+    }
+
+    private func addTab() {
+        let tab = BrowserTab(url: browser.currentURL)
+        tabs.append(tab)
+        selectedTabID = tab.id
+    }
+
+    private func closeTab(_ tab: BrowserTab) {
+        guard tabs.count > 1,
+              let index = tabs.firstIndex(where: { $0.id == tab.id }) else {
+            return
+        }
+
+        let wasSelected = selectedTabID == tab.id
+        tabs.remove(at: index)
+
+        if wasSelected {
+            let nextIndex = min(index, tabs.count - 1)
+            selectTab(tabs[nextIndex])
+        }
+    }
+
+    private func toggleDualPane() {
+        isDualPaneEnabled.toggle()
+
+        if isDualPaneEnabled {
+            secondaryBrowser.navigate(to: browser.currentURL)
+        }
     }
 
     private func installPasteboardShortcutMonitor() {
@@ -240,6 +245,240 @@ struct ContentView: View {
         }
 
         return !browser.isTextInputActive
+    }
+}
+
+struct BrowserTab: Identifiable, Equatable {
+    let id = UUID()
+    var url: URL
+
+    var title: String {
+        if SFTPClient.isSFTPURL(url) {
+            return url.host(percentEncoded: false) ?? "SFTP"
+        }
+
+        if S3Client.isS3URL(url) {
+            return url.host(percentEncoded: false) ?? "S3"
+        }
+
+        return url.lastPathComponent.nilIfEmpty ?? url.path
+    }
+}
+
+struct BrowserTabBar: View {
+    let tabs: [BrowserTab]
+    let selectedTabID: UUID?
+    let isDualPaneEnabled: Bool
+    let onSelect: (BrowserTab) -> Void
+    let onAdd: () -> Void
+    let onClose: (BrowserTab) -> Void
+    let onToggleDualPane: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(tabs) { tab in
+                        BrowserTabButton(
+                            tab: tab,
+                            isSelected: selectedTabID == tab.id,
+                            canClose: tabs.count > 1,
+                            onSelect: onSelect,
+                            onClose: onClose
+                        )
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
+            ToolbarIconButton(systemImageName: "plus", help: "New Tab") {
+                onAdd()
+            }
+
+            ToolbarIconButton(
+                systemImageName: isDualPaneEnabled ? "rectangle.split.2x1.fill" : "rectangle.split.2x1",
+                help: "Dual Pane"
+            ) {
+                onToggleDualPane()
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 42)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct BrowserTabButton: View {
+    let tab: BrowserTab
+    let isSelected: Bool
+    let canClose: Bool
+    let onSelect: (BrowserTab) -> Void
+    let onClose: (BrowserTab) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                onSelect(tab)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.caption)
+
+                    Text(tab.title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: 180, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            if canClose {
+                Button {
+                    onClose(tab)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.string("Close Tab"))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor.opacity(0.18) : Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+struct BrowserPaneView: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            BrowserToolbarView()
+
+            if browser.contentMode == .folder {
+                Divider()
+                BreadcrumbBar()
+            }
+
+            Divider()
+            FileActionBarView()
+            Divider()
+            FileListView()
+            Divider()
+            StatusBarView()
+        }
+        .modifier(BrowserPresentationModifier())
+    }
+}
+
+struct BrowserPresentationModifier: ViewModifier {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $browser.isConnectServerDialogPresented) {
+                ConnectServerSheet()
+                    .environmentObject(browser)
+            }
+            .sheet(isPresented: $browser.isExternalToolsSettingsPresented) {
+                ExternalToolsSettingsSheet()
+                    .environmentObject(browser)
+            }
+            .sheet(isPresented: $browser.isLauncherFoldersSettingsPresented) {
+                LauncherFoldersSettingsSheet()
+                    .environmentObject(browser)
+            }
+            .sheet(item: $browser.renameRequest) { request in
+                RenameSheet(
+                    request: request,
+                    onCommit: { newName in
+                        browser.rename(url: request.url, to: newName)
+                    },
+                    onCancel: {
+                        browser.cancelRename()
+                    }
+                )
+            }
+            .sheet(item: $browser.fileInfoRequest) { request in
+                FileInfoSheet(
+                    request: request,
+                    onClose: {
+                        browser.cancelGetInfo()
+                    }
+                )
+            }
+            .sheet(item: $browser.gitCloneRequest) { request in
+                GitCloneSheet(
+                    request: request,
+                    onClone: { repository, destinationName in
+                        browser.gitClone(
+                            request: request,
+                            repository: repository,
+                            destinationName: destinationName
+                        )
+                    },
+                    onCancel: {
+                        browser.cancelGitClone()
+                    }
+                )
+            }
+            .sheet(item: $browser.gitCommitRequest) { request in
+                GitCommitSheet(
+                    request: request,
+                    onCommit: { message in
+                        browser.gitCommit(request: request, message: message)
+                    },
+                    onCancel: {
+                        browser.cancelGitCommit()
+                    }
+                )
+            }
+            .sheet(item: $browser.gitBranchRequest) { request in
+                GitBranchSheet(
+                    request: request,
+                    onSelect: { branchName in
+                        browser.gitBranch(request: request, branchName: branchName)
+                    },
+                    onCancel: {
+                        browser.cancelGitBranchRequest()
+                    }
+                )
+            }
+            .sheet(item: $browser.gitOperationResult) { result in
+                GitOperationResultSheet(
+                    result: result,
+                    onClose: {
+                        browser.clearGitOperationResult()
+                    }
+                )
+            }
+            .alert(
+                browser.alertTitle,
+                isPresented: Binding(
+                    get: { browser.errorMessage != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            browser.clearError()
+                        }
+                    }
+                )
+            ) {
+                Button(L10n.string("OK")) {
+                    browser.clearError()
+                }
+            } message: {
+                Text(browser.errorMessage ?? "")
+            }
     }
 }
 
@@ -793,6 +1032,14 @@ struct FileActionBarView: View {
             .help(L10n.string("View mode"))
 
             FileGroupMenuButton()
+
+            Divider()
+                .frame(height: 22)
+
+            ToolbarIconButton(systemImageName: "square.and.arrow.down", help: "Clone Repository") {
+                browser.beginGitClone()
+            }
+            .disabled(!browser.canCloneRepository)
 
             Divider()
                 .frame(height: 22)
@@ -2089,6 +2336,12 @@ struct FileGalleryThumbnailCell: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
         )
+        .overlay(alignment: .topTrailing) {
+            if let gitStatus = browser.gitStatus(for: item) {
+                GitStatusBadge(status: gitStatus)
+                    .padding(3)
+            }
+        }
         .contentShape(Rectangle())
     }
 }
@@ -2263,6 +2516,12 @@ struct FileIconCell: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
         )
+        .overlay(alignment: .topTrailing) {
+            if let gitStatus = browser.gitStatus(for: item) {
+                GitStatusBadge(status: gitStatus)
+                    .padding(3)
+            }
+        }
         .contentShape(Rectangle())
     }
 }
@@ -2347,6 +2606,8 @@ struct HeaderCell: View {
 }
 
 struct FileRow: View {
+    @EnvironmentObject private var browser: FileBrowserViewModel
+
     let item: FileItem
 
     var body: some View {
@@ -2357,6 +2618,10 @@ struct FileRow: View {
                 Text(item.displayName)
                     .lineLimit(1)
                     .truncationMode(.middle)
+
+                if let gitStatus = browser.gitStatus(for: item) {
+                    GitStatusBadge(status: gitStatus)
+                }
             }
             .padding(.horizontal, FileListLayout.columnHorizontalPadding)
             .frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
@@ -2383,6 +2648,40 @@ struct FileRow: View {
         .font(.system(size: 13))
         .frame(height: 28)
         .contentShape(Rectangle())
+    }
+}
+
+struct GitStatusBadge: View {
+    let status: GitFileStatus
+
+    var body: some View {
+        Text(status.badge)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white)
+            .frame(minWidth: 17, minHeight: 15)
+            .padding(.horizontal, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(color)
+            )
+            .help(L10n.string(status.titleKey))
+    }
+
+    private var color: Color {
+        switch status {
+        case .modified:
+            return .orange
+        case .added:
+            return .green
+        case .deleted:
+            return .red
+        case .renamed:
+            return .blue
+        case .untracked:
+            return .secondary
+        case .conflicted:
+            return .purple
+        }
     }
 }
 
@@ -2505,6 +2804,14 @@ struct FolderContextMenu: View {
             GitFolderContextMenu()
         }
 
+        if browser.canCloneRepository {
+            Divider()
+
+            Button(L10n.string("Clone Repository...")) {
+                browser.beginGitClone()
+            }
+        }
+
         Divider()
 
         Button(L10n.string("Open in Terminal")) {
@@ -2557,6 +2864,16 @@ struct GitItemContextMenu: View {
             }
             .disabled(!browser.canGitCommit(item))
 
+            Button(L10n.string("Git Diff Selected")) {
+                browser.gitDiff(item)
+            }
+            .disabled(!browser.canGitAdd(item))
+
+            Button(L10n.string("Git History Selected")) {
+                browser.gitHistory(item)
+            }
+            .disabled(!browser.canGitAdd(item))
+
             Divider()
 
             Button(L10n.string("Checkout Branch...")) {
@@ -2594,6 +2911,19 @@ struct GitFolderContextMenu: View {
                 browser.beginGitCommitSelection()
             }
             .disabled(!browser.canGitCommitSelection)
+
+            Button(L10n.string("Git Diff")) {
+                browser.gitDiffRepository()
+            }
+
+            Button(L10n.string("Git History")) {
+                browser.gitHistoryRepository()
+            }
+
+            Button(L10n.string("Clone Repository...")) {
+                browser.beginGitClone()
+            }
+            .disabled(!browser.canCloneRepository)
 
             Divider()
 
@@ -2855,6 +3185,21 @@ struct GitRepositoryMenuItems: View {
 
         Divider()
 
+        Button(L10n.string("Git Diff")) {
+            browser.gitDiffRepository()
+        }
+
+        Button(L10n.string("Git History")) {
+            browser.gitHistoryRepository()
+        }
+
+        Button(L10n.string("Clone Repository...")) {
+            browser.beginGitClone()
+        }
+        .disabled(!browser.canCloneRepository)
+
+        Divider()
+
         Button(L10n.string("Checkout Branch...")) {
             browser.beginGitCheckoutBranch()
         }
@@ -3100,6 +3445,84 @@ struct GitCommitSheet: View {
         .onAppear {
             isFocused = true
         }
+    }
+}
+
+struct GitCloneSheet: View {
+    let request: GitCloneRequest
+    let onClone: (String, String) -> Void
+    let onCancel: () -> Void
+
+    @State private var repository = ""
+    @State private var destinationName = ""
+    @FocusState private var focusedField: GitCloneField?
+
+    private enum GitCloneField {
+        case repository
+        case destinationName
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(L10n.string("Clone Repository"))
+                .font(.headline)
+
+            FileInfoRow(title: "Location", value: request.destinationURL.path)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(L10n.string("Repository URL"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("git@github.com:owner/repository.git", text: $repository)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .repository)
+                    .onSubmit {
+                        cloneIfPossible()
+                    }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(L10n.string("Destination Folder"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField(L10n.string("Optional"), text: $destinationName)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .destinationName)
+                    .onSubmit {
+                        cloneIfPossible()
+                    }
+            }
+
+            HStack {
+                Spacer()
+
+                Button(L10n.string("Cancel")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(L10n.string("Clone")) {
+                    cloneIfPossible()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onAppear {
+            focusedField = .repository
+        }
+    }
+
+    private func cloneIfPossible() {
+        guard !repository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        onClone(repository, destinationName)
     }
 }
 

@@ -1,43 +1,165 @@
 # Shodana
 
-Shodana は macOS 向けのファイルマネージャーです。Finder の雰囲気を保ちながら、Windows Explorer のようにパス入力、階層移動、切り取り/貼り付け、詳細表示を扱いやすくすることを目指しています。
+**The Developer Workspace for macOS**
+
+> Manage local files, Git repositories, cloud storage, and remote servers from one application.
+
+Shodana は、macOS 向けの開発者ワークスペースです。
+
+Finder の雰囲気を保ちながら、Windows Explorer のような分かりやすいパス操作を取り入れ、さらに Git、SFTP、SMB、Amazon S3、Google Drive、OneDrive、SharePoint、Terminal、iTerm、IDE 連携まで一つの画面で扱えることを目指しています。
+
+単なる Finder 代替ではなく、開発者やインフラエンジニアが毎日使うローカル、Git、クラウド、リモート、IDE を横断する作業環境として育てているアプリです。
+
+```text
+One application.
+All your development resources.
+Local. Git. Cloud. Remote. IDE.
+```
 
 ## このプロジェクトについて
 
 Shodana は Swift / SwiftUI / AppKit で作っている macOS アプリです。Swift Package Manager でそのままビルドできます。Xcode プロジェクトではなく `Package.swift` を中心にした構成なので、ターミナルから `swift run` や `swift build` で扱えます。
 
-主な狙いは次の通りです。
+## なぜ Shodana なのか
 
-- Finder に近い見た目と操作感にする
-- パス入力や階層移動を Finder よりわかりやすくする
-- 業務ファイル管理でよく使うコピー、移動、リネーム、詳細表示を読みやすくする
-- NAS、SFTP、S3、クラウドストレージを左メニューから扱いやすくする
-- Terminal、iTerm、IDE、エディタなどの外部ツールと連携しやすくする
-- 日本語/英語の表示に対応し、通常は OS の言語設定に従う
+Finder は macOS に深く統合されていて優れていますが、開発者が日常的に使う Git、SFTP、S3、IDE、Terminal との往復は別々のアプリやコマンドに分散しがちです。
 
-## 主な機能
+Shodana は、次のような作業を一つのワークスペースにまとめます。
 
+- ローカルファイルとクラウド同期フォルダを同じ操作感で扱う
+- NAS、SFTP、S3 などのリモートリソースを `Locations` から開く
+- Git リポジトリでブランチ、Pull、Push、Add、Commit、Merge を実行する
+- 現在のフォルダや選択フォルダを Terminal、iTerm、VSCode、JetBrains IDE で開く
+- パスバー、パンくず、詳細表示、検索、右クリックメニューで業務ファイル管理を読みやすくする
+- 日本語/英語、ライト/ダークを OS 設定または手動設定で切り替える
+
+## 現在の主な機能
+
+### Local Files
+
+- Finder に近い見た目と、Explorer ライクな分かりやすいファイル操作
 - アドレスバーへ直接パスを入力して移動
+- 複数ディレクトリをタブで切り替え
+- デュアルペインで2つのフォルダを並べて表示
 - 通常のフォルダ表示と検索結果表示の切り替え
+- 検索対象パスを指定した検索、Spotlight (`mdfind`) 利用、検索中断
 - パンくずリストで上位階層へ移動
 - 戻る、進む、上の階層へ移動
 - 一覧表示、アイコン表示、カラム表示、ギャラリー表示の切り替え
 - 種類、変更日、サイズによるグループ表示
-- 業務ファイル向けの詳細表示
+- 業務ファイル向けの詳細表示、列余白、ストライプ表示
 - ファイル/フォルダの新規作成、名前変更、複製、削除
+- 右クリックメニューから情報を見る
 - Command+C / Command+X / Command+V によるコピー、切り取り、貼り付け
 - 右クリックメニューからコピー、切り取り、貼り付け、パスコピー、Finder 表示
 - `.app` などのパッケージを右クリックして内容を表示
 - 右クリックメニューから ZIP / TAR / TAR.GZ / TAR.BZ2 / TAR.XZ 形式で圧縮、同じ形式を解凍
-- サイドバーの Favorites へフォルダをドラッグ&ドロップで追加
-- Locations に Google Drive、OneDrive、SharePoint、マウント済みボリューム、NAS などを表示
-- SMB、SFTP、S3 接続
+- 複数ファイルのドラッグ&ドロップ
+
+### Git
+
+- 現在開いているフォルダが Git リポジトリの場合に自動検出
+- ステータスバーにブランチ名を表示
+- 未プッシュ、リモート側の進行状態を矢印で表示
+- ファイル一覧に Git Status バッジを表示
+- ステータスバーの Git メニューから Pull、Push、ブランチ切り替え、Merge
+- 右クリックメニューから選択項目の Git Add、Git Commit
+- Commit Message 入力ダイアログ
+- 選択項目またはリポジトリ全体の Git Diff 表示
+- 選択項目またはリポジトリ全体の Git History 表示
+- URL を入力して Git Repository を Clone
+- Pull、Push、Commit、Merge などの実行結果を読みやすい結果画面で表示
+
+### Remote
+
+- SMB による NAS や Windows 共有のマウント
+- SFTP 接続、ブラウズ、アップロード、ダウンロード
+- `~/.ssh/config` の Host 名を使った SFTP 接続
 - SFTP 上のフォルダを Terminal / iTerm で開く
+- Amazon S3 接続、ブラウズ、アップロード、ダウンロード
+- AWS CLI の profile 一覧から S3 接続 profile を選択
+- 接続先を `Locations` に保存
+- 起動時や `Reload Locations` で再接続
+- 接続できない場所も失敗アイコン付きで `Locations` に保持
+
+### Cloud Storage
+
+- Google Drive、OneDrive、SharePoint の同期フォルダを `Locations` に表示
+- マウント済みボリューム、外部ドライブ、NAS を `Locations` に表示
+- `Locations` の表示名指定、並び替え
+
+### Development Tools
+
+- 現在のフォルダを Terminal / iTerm で開く
 - 選択フォルダを WebStorm、PyCharm、VSCode などの外部アプリで開く
 - 外部ツールボタンの追加、変更、削除、並び替え
 - 外部ツールボタンに起動先アプリのアイコン、または任意の SF Symbol を表示
+
+### Productivity
+
+- サイドバーの Favorites へフォルダをドラッグ&ドロップで追加
+- Favorites の削除
+- Dock メニューから新規ウィンドウ、Desktop、Downloads、任意フォルダを開く
+- `shodana://` URL スキームから Shodana を開く
 - 日本語/英語の表示切り替え
 - システム、ライト、ダークの外観切り替え
+
+## Roadmap
+
+Shodana は開発中のアプリです。以下は、現在未実装または強化予定の機能候補です。
+
+### Priority 1
+
+- タブの状態保持: タブごとの履歴、選択状態、検索状態を保持
+- デュアルペイン強化: 左右ペイン間のコピー、移動、同期操作を明確化
+- Git Status 強化: ステージ済み、未ステージ、リネーム、競合の詳細表示
+- Git Diff Viewer 強化: ファイル単位の差分ナビゲーション、色付き表示
+- Git History 強化: コミット詳細、変更ファイル、ブランチグラフ表示
+- Clone Repository 強化: clone 後の自動オープン、履歴、よく使うホスト補完
+
+### Priority 2
+
+- Folder Compare: ローカル、SFTP、S3 などのフォルダ比較
+- Folder Sync: Local、SFTP、S3 間の同期
+- Copy Queue: コピー、移動、アップロード、ダウンロードをバックグラウンド実行
+- Background Upload: 大量ファイル転送の進捗管理
+- Advanced Search: ファイル内容、正規表現、Git Ignore 対応検索
+- Workspace: Backend、Frontend、Terraform、Docker などの関連フォルダを一括管理
+- Session Restore: 前回終了時のウィンドウ、タブ、接続先を復元
+- Bookmark Sync: 複数 Mac 間で Favorites や Locations を同期
+
+### Priority 3
+
+- SSH Console: SSH ターミナルを内蔵
+- Docker Browser: Container、Volume、Log の閲覧
+- Kubernetes Browser: Namespace、Pod、Log の閲覧
+- AWS Browser: EC2、S3、CloudWatch の横断表示
+- AI Assist: 自然言語検索、Git Commit Message 生成、Shell Command 生成、Rename 提案
+
+## 将来的な製品構成案
+
+Community 版と Pro 版を分ける場合は、次のような整理が考えられます。
+
+### Community
+
+- ローカルファイル管理
+- Git 基本操作
+- Terminal / iTerm 起動
+- IDE 連携
+- Favorites / Locations
+
+### Pro
+
+- Folder Compare
+- Folder Sync
+- Background Transfer
+- SFTP / S3 同期
+- SharePoint / Google Drive 連携強化
+- Workspace
+- Session Restore
+- SSH Console
+- 高速検索
+- AI 支援
 
 ## 必要なもの
 

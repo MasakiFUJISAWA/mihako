@@ -93,6 +93,59 @@ enum GitClient {
         .filter { !$0.isEmpty }
     }
 
+    static func status(in repositoryURL: URL) async throws -> [String: GitFileStatus] {
+        let output = try await output(
+            arguments: ["status", "--porcelain=v1"],
+            currentDirectoryURL: repositoryURL
+        )
+        var statuses: [String: GitFileStatus] = [:]
+
+        for line in output.split(separator: "\n").map(String.init) {
+            guard line.count >= 4 else {
+                continue
+            }
+
+            let code = String(line.prefix(2))
+            let rawPath = String(line.dropFirst(3))
+            let path = rawPath.components(separatedBy: " -> ").last ?? rawPath
+            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !trimmedPath.isEmpty else {
+                continue
+            }
+
+            statuses[trimmedPath] = status(from: code)
+        }
+
+        return statuses
+    }
+
+    static func diff(paths: [String], in repositoryURL: URL) async throws -> String {
+        let arguments = paths.isEmpty
+            ? ["diff", "--no-ext-diff"]
+            : ["diff", "--no-ext-diff", "--"] + paths
+        return try await run(arguments: arguments, currentDirectoryURL: repositoryURL)
+    }
+
+    static func history(paths: [String], in repositoryURL: URL) async throws -> String {
+        let arguments = paths.isEmpty
+            ? ["log", "--graph", "--decorate", "--date=short", "--pretty=format:%h %ad %d %s", "-n", "80"]
+            : ["log", "--graph", "--decorate", "--date=short", "--pretty=format:%h %ad %d %s", "-n", "80", "--"] + paths
+        return try await run(arguments: arguments, currentDirectoryURL: repositoryURL)
+    }
+
+    static func clone(repository: String, destinationName: String?, in destinationURL: URL) async throws -> String {
+        let trimmedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        var arguments = ["clone", trimmedRepository]
+
+        if let destinationName,
+           !destinationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments.append(destinationName.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        return try await run(arguments: arguments, currentDirectoryURL: destinationURL)
+    }
+
     static func pull(in repositoryURL: URL) async throws -> String {
         try await run(arguments: ["pull"], currentDirectoryURL: repositoryURL)
     }
@@ -140,6 +193,30 @@ enum GitClient {
         }
 
         return GitTrackingStatus(aheadCount: aheadCount, behindCount: behindCount)
+    }
+
+    private static func status(from code: String) -> GitFileStatus {
+        if code.contains("U") || code == "AA" || code == "DD" {
+            return .conflicted
+        }
+
+        if code == "??" {
+            return .untracked
+        }
+
+        if code.contains("D") {
+            return .deleted
+        }
+
+        if code.contains("A") {
+            return .added
+        }
+
+        if code.contains("R") {
+            return .renamed
+        }
+
+        return .modified
     }
 
     private static func output(arguments: [String], currentDirectoryURL: URL) async throws -> String {

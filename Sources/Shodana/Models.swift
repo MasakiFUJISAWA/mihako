@@ -163,6 +163,54 @@ struct GitOperationResult: Identifiable {
     let detail: String
 }
 
+struct GitCloneRequest: Identifiable {
+    let id = UUID()
+    let destinationURL: URL
+}
+
+enum GitFileStatus: String, Hashable, Sendable {
+    case modified
+    case added
+    case deleted
+    case renamed
+    case untracked
+    case conflicted
+
+    var badge: String {
+        switch self {
+        case .modified:
+            return "M"
+        case .added:
+            return "A"
+        case .deleted:
+            return "D"
+        case .renamed:
+            return "R"
+        case .untracked:
+            return "?"
+        case .conflicted:
+            return "!"
+        }
+    }
+
+    var titleKey: String {
+        switch self {
+        case .modified:
+            return "Git Status Modified"
+        case .added:
+            return "Git Status Added"
+        case .deleted:
+            return "Git Status Deleted"
+        case .renamed:
+            return "Git Status Renamed"
+        case .untracked:
+            return "Git Status Untracked"
+        case .conflicted:
+            return "Git Status Conflicted"
+        }
+    }
+}
+
 enum ShodanaTransferType {
     static let fileURLs = "dev.masakifujisawa.shodana.file-urls"
     static let sftpURL = "dev.masakifujisawa.shodana.sftp-url"

@@ -23,8 +23,10 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var fileInfoRequest: FileInfoRequest?
     @Published var gitCommitRequest: GitCommitRequest?
     @Published var gitBranchRequest: GitBranchRequest?
+    @Published var gitCloneRequest: GitCloneRequest?
     @Published var gitOperationResult: GitOperationResult?
     @Published private(set) var gitRepositoryInfo: GitRepositoryInfo?
+    @Published private(set) var gitStatusByPath: [String: GitFileStatus] = [:]
     @Published private(set) var pendingClipboardOperation: FileClipboardOperation?
     @Published private(set) var sidebarSections: [SidebarSection] = []
     @Published var viewMode: BrowserViewMode = .list
@@ -90,6 +92,7 @@ final class FileBrowserViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var gitRepositoryInfoTask: Task<Void, Never>?
     private var gitRemoteTrackingTask: Task<Void, Never>?
+    private var gitStatusTask: Task<Void, Never>?
 
     private enum TerminalApp {
         case terminal
@@ -105,7 +108,10 @@ final class FileBrowserViewModel: ObservableObject {
             ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
     }
 
-    init(startURL: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(
+        startURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        reconnectSavedServers shouldReconnectSavedServers: Bool = true
+    ) {
         let initialURL = startURL.standardizedFileURL
         currentURL = initialURL
         addressText = initialURL.path
@@ -130,13 +136,17 @@ final class FileBrowserViewModel: ObservableObject {
         refreshSidebarLocations()
         reload()
         startGitRemoteTrackingMonitor()
-        reconnectSavedServers()
+
+        if shouldReconnectSavedServers {
+            reconnectSavedServers()
+        }
     }
 
     deinit {
         searchTask?.cancel()
         gitRepositoryInfoTask?.cancel()
         gitRemoteTrackingTask?.cancel()
+        gitStatusTask?.cancel()
     }
 
     var canGoBack: Bool {
@@ -221,6 +231,10 @@ final class FileBrowserViewModel: ObservableObject {
         gitRepositoryInfo != nil
     }
 
+    var canCloneRepository: Bool {
+        currentURL.isFileURL
+    }
+
     var gitBranchDisplayName: String? {
         gitRepositoryInfo?.branchName
     }
@@ -256,6 +270,35 @@ final class FileBrowserViewModel: ObservableObject {
 
     var canGitCommitSelection: Bool {
         canGitAddSelection
+    }
+
+    func gitStatus(for item: FileItem) -> GitFileStatus? {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL,
+              item.url.isFileURL,
+              !gitStatusByPath.isEmpty else {
+            return nil
+        }
+
+        guard let relativePath = repositoryRelativePath(for: item.url, repositoryURL: repositoryURL),
+              !relativePath.isEmpty,
+              relativePath != "." else {
+            return nil
+        }
+
+        if let exactStatus = gitStatusByPath[relativePath] ?? gitStatusByPath["\(relativePath)/"] {
+            return exactStatus
+        }
+
+        guard item.isDirectory else {
+            return nil
+        }
+
+        let prefix = "\(relativePath)/"
+        let descendantStatuses = gitStatusByPath
+            .filter { $0.key.hasPrefix(prefix) }
+            .map(\.value)
+
+        return descendantStatuses.sorted(by: gitStatusPriority(_:_:)).first
     }
 
     var currentDisplayAddress: String {
@@ -361,6 +404,8 @@ final class FileBrowserViewModel: ObservableObject {
 
         guard !isCurrentRemote else {
             gitRepositoryInfo = nil
+            gitStatusTask?.cancel()
+            gitStatusByPath = [:]
             return
         }
 
@@ -374,6 +419,30 @@ final class FileBrowserViewModel: ObservableObject {
                 }
 
                 self.gitRepositoryInfo = info
+                self.refreshGitStatus(repositoryURL: info?.rootURL)
+            }
+        }
+    }
+
+    private func refreshGitStatus(repositoryURL: URL?) {
+        gitStatusTask?.cancel()
+
+        guard let repositoryURL else {
+            gitStatusByPath = [:]
+            return
+        }
+
+        gitStatusTask = Task { [weak self] in
+            let statuses = (try? await GitClient.status(in: repositoryURL)) ?? [:]
+
+            await MainActor.run {
+                guard let self,
+                      !Task.isCancelled,
+                      self.gitRepositoryInfo?.rootURL == repositoryURL else {
+                    return
+                }
+
+                self.gitStatusByPath = statuses
             }
         }
     }
@@ -2290,6 +2359,49 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    func beginGitClone() {
+        guard canCloneRepository else {
+            presentMessage(L10n.string("Clone destination must be a local folder."))
+            return
+        }
+
+        gitCloneRequest = GitCloneRequest(destinationURL: currentURL)
+    }
+
+    func cancelGitClone() {
+        gitCloneRequest = nil
+    }
+
+    func gitClone(request: GitCloneRequest, repository: String, destinationName: String) {
+        let trimmedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDestinationName = destinationName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedRepository.isEmpty else {
+            presentMessage(L10n.string("Repository URL cannot be empty."))
+            return
+        }
+
+        Task {
+            do {
+                let output = try await GitClient.clone(
+                    repository: trimmedRepository,
+                    destinationName: trimmedDestinationName.nilIfEmpty,
+                    in: request.destinationURL
+                )
+
+                gitCloneRequest = nil
+                presentGitResult(
+                    action: "Git Clone",
+                    output: output,
+                    fallbackMessage: "Git clone completed."
+                )
+                reload()
+            } catch {
+                presentError(error, action: "Git Clone")
+            }
+        }
+    }
+
     func gitPush() {
         performGitOperation(
             action: "Git Push",
@@ -2305,6 +2417,30 @@ final class FileBrowserViewModel: ObservableObject {
 
     func gitAddSelection() {
         gitAdd(items: selectedItems)
+    }
+
+    func gitDiff(_ item: FileItem) {
+        gitDiff(items: contextualItems(for: item))
+    }
+
+    func gitDiffSelection() {
+        gitDiff(items: selectedItems)
+    }
+
+    func gitDiffRepository() {
+        gitDiff(items: [])
+    }
+
+    func gitHistory(_ item: FileItem) {
+        gitHistory(items: contextualItems(for: item))
+    }
+
+    func gitHistorySelection() {
+        gitHistory(items: selectedItems)
+    }
+
+    func gitHistoryRepository() {
+        gitHistory(items: [])
     }
 
     func beginGitCommit(_ item: FileItem) {
@@ -2461,6 +2597,48 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
+    private func gitDiff(items: [FileItem]) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return
+        }
+
+        let paths = items.isEmpty ? [] : gitPaths(for: items, in: repositoryURL)
+
+        Task {
+            do {
+                let output = try await GitClient.diff(paths: paths, in: repositoryURL)
+                presentGitResult(
+                    action: "Git Diff",
+                    output: output,
+                    fallbackMessage: "No changes."
+                )
+            } catch {
+                presentError(error, action: "Git Diff")
+            }
+        }
+    }
+
+    private func gitHistory(items: [FileItem]) {
+        guard let repositoryURL = gitRepositoryInfo?.rootURL else {
+            return
+        }
+
+        let paths = items.isEmpty ? [] : gitPaths(for: items, in: repositoryURL)
+
+        Task {
+            do {
+                let output = try await GitClient.history(paths: paths, in: repositoryURL)
+                presentGitResult(
+                    action: "Git History",
+                    output: output,
+                    fallbackMessage: "No history."
+                )
+            } catch {
+                presentError(error, action: "Git History")
+            }
+        }
+    }
+
     private func performGitOperation(
         action: String,
         successMessage: String,
@@ -2541,6 +2719,27 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         return String(targetPath.dropFirst(repositoryPrefix.count)).nilIfEmpty
+    }
+
+    private func gitStatusPriority(_ left: GitFileStatus, _ right: GitFileStatus) -> Bool {
+        gitStatusPriority(left) < gitStatusPriority(right)
+    }
+
+    private func gitStatusPriority(_ status: GitFileStatus) -> Int {
+        switch status {
+        case .conflicted:
+            return 0
+        case .deleted:
+            return 1
+        case .added:
+            return 2
+        case .renamed:
+            return 3
+        case .modified:
+            return 4
+        case .untracked:
+            return 5
+        }
     }
 
     private func commonParentDirectory(for urls: [URL]) -> URL? {
