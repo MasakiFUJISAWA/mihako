@@ -874,16 +874,20 @@ final class FileBrowserViewModel: ObservableObject {
         let settings = aiSearchSettings.normalized
         let apiKey = aiProviderAPIKey
         let previousMessages = aiChatMessages
+        let contextSearchQuestion = Self.aiContextSearchQuestion(
+            currentQuestion: question,
+            previousMessages: previousMessages
+        )
 
         hasPerformedSearch = true
         isAIThinking = true
         aiContextSummary = L10n.string("Preparing AI context...")
         aiChatMessages.append(AIChatMessage(role: .user, content: question))
 
-        aiSearchTask = Task { [weak self, settings, apiKey, question, scopeURLs, previousMessages] in
+        aiSearchTask = Task { [weak self, settings, apiKey, question, contextSearchQuestion, scopeURLs, previousMessages] in
             do {
                 let contextResult = try await AISearchContextBuilder.collectContext(
-                    question: question,
+                    question: contextSearchQuestion,
                     rootURLs: scopeURLs,
                     settings: settings
                 )
@@ -896,7 +900,7 @@ final class FileBrowserViewModel: ObservableObject {
                 } else {
                     let messages = AISearchPromptBuilder.messages(
                         question: question,
-                        contextFiles: contextResult.files,
+                        contextResult: contextResult,
                         previousMessages: previousMessages,
                         settings: settings
                     )
@@ -1042,6 +1046,21 @@ final class FileBrowserViewModel: ObservableObject {
 
         Shodana prepared \(contextResult.files.count) context files from the allowed AI scope. Open AI Search Settings and set a Chat Completions endpoint, model, and API key to send this context to your licensed AI provider.
         """
+    }
+
+    private nonisolated static func aiContextSearchQuestion(
+        currentQuestion: String,
+        previousMessages: [AIChatMessage]
+    ) -> String {
+        let recentContext = previousMessages
+            .suffix(8)
+            .filter { $0.role == .user }
+            .map(\.content)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return (recentContext + [currentQuestion])
+            .joined(separator: "\n")
     }
 
     private static func aiContextSummaryText(_ contextResult: AIContextBuildResult) -> String {

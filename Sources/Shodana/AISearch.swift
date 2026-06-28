@@ -231,6 +231,7 @@ struct AIContextFile: Identifiable, Hashable, Sendable {
     let relativePath: String
     let snippet: String
     let matchSummary: String
+    let isPathMatch: Bool
     let size: Int
     let modifiedAt: Date?
     let score: Int
@@ -238,6 +239,7 @@ struct AIContextFile: Identifiable, Hashable, Sendable {
 
 struct AIContextBuildResult: Sendable {
     let files: [AIContextFile]
+    let matchingPaths: [String]
     let scannedFileCount: Int
     let skippedFileCount: Int
 }
@@ -292,6 +294,7 @@ enum AISearchContextBuilder {
                 .isHiddenKey
             ]
             var candidates: [AIContextFile] = []
+            var matchingPathCandidates: [(path: String, score: Int)] = []
             var scannedFileCount = 0
             var skippedFileCount = 0
 
@@ -314,6 +317,11 @@ enum AISearchContextBuilder {
                     let relativePath = relativePath(for: url, rootURL: rootURL)
                     let values = try? url.resourceValues(forKeys: Set(keys))
                     let isDirectory = values?.isDirectory == true
+                    let pathScore = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
+
+                    if pathScore > 0 {
+                        matchingPathCandidates.append((relativePath, pathScore))
+                    }
 
                     if isIgnored(relativePath: relativePath, name: url.lastPathComponent, patterns: patterns) {
                         if isDirectory {
@@ -324,8 +332,7 @@ enum AISearchContextBuilder {
                     }
 
                     if isDirectory {
-                        let score = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
-                        if score > 0 {
+                        if pathScore > 0 {
                             candidates.append(
                                 AIContextFile(
                                     url: url,
@@ -338,9 +345,10 @@ enum AISearchContextBuilder {
                                         modifiedAt: values?.contentModificationDate
                                     ),
                                     matchSummary: "matched path",
+                                    isPathMatch: true,
                                     size: 0,
                                     modifiedAt: values?.contentModificationDate,
-                                    score: score
+                                    score: pathScore
                                 )
                             )
                         }
@@ -353,8 +361,6 @@ enum AISearchContextBuilder {
                     }
 
                     scannedFileCount += 1
-
-                    let pathScore = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
 
                     guard isLikelyTextFile(url),
                           let size = values?.fileSize,
@@ -372,6 +378,7 @@ enum AISearchContextBuilder {
                                         modifiedAt: values?.contentModificationDate
                                     ),
                                     matchSummary: "matched path; content not included",
+                                    isPathMatch: true,
                                     size: values?.fileSize ?? 0,
                                     modifiedAt: values?.contentModificationDate,
                                     score: pathScore
@@ -397,6 +404,7 @@ enum AISearchContextBuilder {
                                         modifiedAt: values?.contentModificationDate
                                     ),
                                     matchSummary: "matched path; content not readable",
+                                    isPathMatch: true,
                                     size: size,
                                     modifiedAt: values?.contentModificationDate,
                                     score: pathScore
@@ -425,6 +433,7 @@ enum AISearchContextBuilder {
                             relativePath: relativePath,
                             snippet: snippet(from: text, queryTerms: queryTerms),
                             matchSummary: matchSummary(relativePath: relativePath, text: text, queryTerms: queryTerms),
+                            isPathMatch: pathScore > 0,
                             size: size,
                             modifiedAt: values?.contentModificationDate,
                             score: score
@@ -433,18 +442,25 @@ enum AISearchContextBuilder {
                 }
             }
 
-            let files = candidates
+            let sortedCandidates = candidates.sorted(by: compareContextFiles)
+            let pathMatchedFiles = sortedCandidates.filter(\.isPathMatch)
+            let otherFiles = sortedCandidates.filter { !$0.isPathMatch }
+            let files = Array((pathMatchedFiles + otherFiles).prefix(normalizedSettings.maxFiles))
+            let matchingPaths = matchingPathCandidates
                 .sorted { left, right in
                     if left.score == right.score {
-                        return left.relativePath.localizedStandardCompare(right.relativePath) == .orderedAscending
+                        return left.path.localizedStandardCompare(right.path) == .orderedAscending
                     }
 
                     return left.score > right.score
                 }
-                .prefix(normalizedSettings.maxFiles)
+                .map(\.path)
+                .aiUniqued()
+                .prefix(200)
 
             return AIContextBuildResult(
                 files: Array(files),
+                matchingPaths: Array(matchingPaths),
                 scannedFileCount: scannedFileCount,
                 skippedFileCount: skippedFileCount
             )
@@ -455,6 +471,14 @@ enum AISearchContextBuilder {
         } onCancel: {
             worker.cancel()
         }
+    }
+
+    private static func compareContextFiles(_ left: AIContextFile, _ right: AIContextFile) -> Bool {
+        if left.score == right.score {
+            return left.relativePath.localizedStandardCompare(right.relativePath) == .orderedAscending
+        }
+
+        return left.score > right.score
     }
 
     private static func searchTerms(from question: String) -> [String] {
@@ -744,6 +768,13 @@ private extension String {
     }
 }
 
+private extension Array where Element: Hashable {
+    func aiUniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}
+
 enum AIChatClient {
     struct ChatMessage: Codable, Sendable {
         let role: String
@@ -827,14 +858,14 @@ enum AIChatClient {
 enum AISearchPromptBuilder {
     static func messages(
         question: String,
-        contextFiles: [AIContextFile],
+        contextResult: AIContextBuildResult,
         previousMessages: [AIChatMessage],
         settings: AISearchSettings
     ) -> [AIChatClient.ChatMessage] {
         let systemPrompt = """
         You are Shodana's AI search assistant. Answer using only the file context explicitly provided by Shodana. If the context is insufficient, say what is missing and suggest which files or folders should be added to the AI scope. Prefer concise, actionable engineering guidance.
         """
-        let context = contextText(from: contextFiles, limit: settings.normalized.maxContextCharacters)
+        let context = contextText(from: contextResult, limit: settings.normalized.maxContextCharacters)
         let recentHistory = previousMessages
             .suffix(6)
             .map {
@@ -856,13 +887,31 @@ enum AISearchPromptBuilder {
             + [AIChatClient.ChatMessage(role: "user", content: currentQuestion)]
     }
 
-    static func contextText(from files: [AIContextFile], limit: Int) -> String {
-        guard !files.isEmpty else {
+    static func contextText(from contextResult: AIContextBuildResult, limit: Int) -> String {
+        let files = contextResult.files
+
+        guard !files.isEmpty || !contextResult.matchingPaths.isEmpty else {
             return "(No files matched the current AI scope and question.)"
         }
 
         var remainingCharacters = limit
         var chunks: [String] = []
+
+        if !contextResult.matchingPaths.isEmpty {
+            let pathIndex = contextResult.matchingPaths
+                .map { "- \($0)" }
+                .joined(separator: "\n")
+            let chunk = """
+
+            --- MATCHING PATH INDEX ---
+            These paths matched the user's question. Use this index for file location questions even when the file content is not included below.
+            \(pathIndex)
+            ---
+
+            """
+            chunks.append(String(chunk.prefix(remainingCharacters)))
+            remainingCharacters -= min(remainingCharacters, chunk.count)
+        }
 
         for file in files {
             guard remainingCharacters > 0 else {
