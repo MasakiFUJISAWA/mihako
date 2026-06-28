@@ -1446,7 +1446,7 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         guard isDirectory.boolValue else {
-            NSWorkspace.shared.open(targetURL)
+            openExternalFile(targetURL)
             addressText = displayString(for: currentURL)
             return
         }
@@ -1488,8 +1488,7 @@ final class FileBrowserViewModel: ObservableObject {
         if isDirectory.boolValue {
             navigate(to: targetURL)
         } else {
-            navigate(to: targetURL.deletingLastPathComponent())
-            NSWorkspace.shared.open(targetURL)
+            openExternalFile(targetURL)
         }
     }
 
@@ -1521,9 +1520,9 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         if fileManager.fileExists(atPath: resolvedURL.path) {
-            NSWorkspace.shared.open(resolvedURL)
+            openExternalFile(resolvedURL)
         } else {
-            NSWorkspace.shared.open(fallbackURL)
+            openExternalFile(fallbackURL)
         }
     }
 
@@ -1612,7 +1611,7 @@ final class FileBrowserViewModel: ObservableObject {
             downloadAndOpenS3(item.url)
         } else {
             markCloudItemOpening(item.url)
-            NSWorkspace.shared.open(item.url)
+            openExternalFile(item.url)
         }
     }
 
@@ -4852,7 +4851,7 @@ final class FileBrowserViewModel: ObservableObject {
         Task {
             do {
                 try await SFTPClient.download(remoteURLs: [url], to: destinationFolder)
-                NSWorkspace.shared.open(destinationFolder.appendingPathComponent(url.lastPathComponent))
+                openExternalFile(destinationFolder.appendingPathComponent(url.lastPathComponent))
             } catch {
                 presentError(error, action: "Open SFTP item")
             }
@@ -4867,9 +4866,21 @@ final class FileBrowserViewModel: ObservableObject {
         Task {
             do {
                 try await S3Client.download(remoteURLs: [url], to: destinationFolder)
-                NSWorkspace.shared.open(destinationFolder.appendingPathComponent(url.lastPathComponent))
+                openExternalFile(destinationFolder.appendingPathComponent(url.lastPathComponent))
             } catch {
                 presentError(error, action: "Open S3 item")
+            }
+        }
+    }
+
+    private func openExternalFile(_ url: URL) {
+        ExternalFileOpener.open(url) { [weak self] error in
+            guard let error else {
+                return
+            }
+
+            Task { @MainActor in
+                self?.presentError(error, action: "Open")
             }
         }
     }

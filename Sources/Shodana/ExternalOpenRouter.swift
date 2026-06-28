@@ -1,5 +1,7 @@
 import AppKit
+import CoreServices
 import Foundation
+import UniformTypeIdentifiers
 
 @MainActor
 enum ExternalOpenRouter {
@@ -12,15 +14,27 @@ enum ExternalOpenRouter {
 
     static func enqueue(_ urls: [URL]) {
         let destinations = urls.compactMap(destinationURL)
+        let shodanaDestinations = destinations.filter { ExternalFileOpener.shouldOpenInShodana($0) }
+        let externalDestinations = destinations.filter { !ExternalFileOpener.shouldOpenInShodana($0) }
 
-        guard !destinations.isEmpty else {
+        for url in externalDestinations {
+            ExternalFileOpener.open(url) { error in
+                guard let error else {
+                    return
+                }
+
+                showExternalOpenError(error, for: url)
+            }
+        }
+
+        guard !shodanaDestinations.isEmpty else {
             return
         }
 
-        pendingURLs.append(contentsOf: destinations)
+        pendingURLs.append(contentsOf: shodanaDestinations)
 
         if let openWindow {
-            for _ in destinations {
+            for _ in shodanaDestinations {
                 openWindow()
             }
         } else {
@@ -65,5 +79,135 @@ enum ExternalOpenRouter {
         }
 
         return nil
+    }
+
+    private static func showExternalOpenError(_ error: Error, for url: URL) {
+        let alert = NSAlert()
+        alert.messageText = L10n.string("Open File Failed")
+        alert.informativeText = "\(url.lastPathComponent): \(error.localizedDescription)"
+        alert.addButton(withTitle: L10n.string("OK"))
+        alert.runModal()
+    }
+}
+
+@MainActor
+enum ExternalFileOpener {
+    private static let shodanaBundleIdentifiers: Set<String> = [
+        "dev.masakifujisawa.shodana",
+        "dev.masakifujisawa.mihako"
+    ]
+
+    static func shouldOpenInShodana(_ url: URL) -> Bool {
+        guard url.isFileURL else {
+            return true
+        }
+
+        guard let values = try? url.resourceValues(forKeys: [
+            .isAliasFileKey,
+            .isSymbolicLinkKey,
+            .isDirectoryKey,
+            .isPackageKey
+        ]) else {
+            return false
+        }
+
+        if values.isAliasFile == true || values.isSymbolicLink == true {
+            return true
+        }
+
+        return values.isDirectory == true && values.isPackage != true
+    }
+
+    static func open(_ url: URL, completion: (@MainActor @Sendable (Error?) -> Void)? = nil) {
+        let targetURL = url.standardizedFileURL
+
+        if let preferredApplicationURL = preferredApplicationURL(for: targetURL) {
+            NSWorkspace.shared.open(
+                [targetURL],
+                withApplicationAt: preferredApplicationURL,
+                configuration: openConfiguration()
+            ) { _, error in
+                Task { @MainActor in
+                    completion?(error)
+                }
+            }
+            return
+        }
+
+        if let defaultApplicationURL = NSWorkspace.shared.urlForApplication(toOpen: targetURL),
+           !isShodanaApplication(defaultApplicationURL) {
+            NSWorkspace.shared.open(targetURL, configuration: openConfiguration()) { _, error in
+                Task { @MainActor in
+                    completion?(error)
+                }
+            }
+            return
+        }
+
+        if let applicationURL = alternateApplicationURL(for: targetURL) {
+            NSWorkspace.shared.open(
+                [targetURL],
+                withApplicationAt: applicationURL,
+                configuration: openConfiguration()
+            ) { _, error in
+                Task { @MainActor in
+                    completion?(error)
+                }
+            }
+            return
+        }
+
+        let error = NSError(
+            domain: "dev.masakifujisawa.shodana.external-open",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: L10n.string("No external application is available for this file. Change the file's default application in Finder.")
+            ]
+        )
+        completion?(error)
+    }
+
+    private static func preferredApplicationURL(for url: URL) -> URL? {
+        guard isImageFile(url),
+              let previewURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview"),
+              !isShodanaApplication(previewURL) else {
+            return nil
+        }
+
+        return previewURL
+    }
+
+    private static func isImageFile(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
+    }
+
+    private static func alternateApplicationURL(for url: URL) -> URL? {
+        applicationURLs(for: url)
+            .first { !isShodanaApplication($0) }
+    }
+
+    private static func applicationURLs(for url: URL) -> [URL] {
+        guard let unmanagedURLs = LSCopyApplicationURLsForURL(url as CFURL, .all) else {
+            return []
+        }
+
+        let urls = unmanagedURLs.takeRetainedValue() as NSArray
+        return urls.compactMap { $0 as? URL }
+    }
+
+    private static func isShodanaApplication(_ applicationURL: URL) -> Bool {
+        if let bundleIdentifier = Bundle(url: applicationURL)?.bundleIdentifier,
+           shodanaBundleIdentifiers.contains(bundleIdentifier) {
+            return true
+        }
+
+        return applicationURL.lastPathComponent.localizedCaseInsensitiveCompare("Shodana.app") == .orderedSame
+            || applicationURL.lastPathComponent.localizedCaseInsensitiveCompare("Mihako.app") == .orderedSame
+    }
+
+    private static func openConfiguration() -> NSWorkspace.OpenConfiguration {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        return configuration
     }
 }

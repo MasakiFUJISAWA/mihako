@@ -465,14 +465,36 @@ enum AISearchContextBuilder {
             .components(separatedBy: separators)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { $0.count >= 2 }
+        let asciiTerms = asciiIdentifierTerms(from: question)
 
-        if !terms.isEmpty {
+        if !terms.isEmpty || !asciiTerms.isEmpty {
             var seen = Set<String>()
-            return terms.filter { seen.insert($0).inserted }
+            return (terms + asciiTerms).filter { seen.insert($0).inserted }
         }
 
         let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalizedQuestion.isEmpty ? [] : [normalizedQuestion]
+    }
+
+    private static func asciiIdentifierTerms(from question: String) -> [String] {
+        var terms: [String] = []
+        var current = ""
+
+        for scalar in question.unicodeScalars {
+            if CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+                .contains(scalar) {
+                current.unicodeScalars.append(scalar)
+            } else if !current.isEmpty {
+                terms.append(current.lowercased())
+                current = ""
+            }
+        }
+
+        if !current.isEmpty {
+            terms.append(current.lowercased())
+        }
+
+        return terms.filter { $0.count >= 2 }
     }
 
     private static func relativePath(for url: URL, rootURL: URL) -> String {
@@ -542,15 +564,68 @@ enum AISearchContextBuilder {
         }
 
         let lowercasedPath = relativePath.lowercased()
+        let tokens = pathTokens(from: lowercasedPath)
         var score = 0
 
         for term in queryTerms {
             if lowercasedPath.contains(term) {
                 score += 12
+            } else if tokens.contains(where: { isFuzzyMatch(term, candidate: $0) }) {
+                score += 8
             }
         }
 
         return score
+    }
+
+    private static func pathTokens(from path: String) -> [String] {
+        path
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
+    }
+
+    private static func isFuzzyMatch(_ term: String, candidate: String) -> Bool {
+        guard term.count >= 4,
+              candidate.count >= 4,
+              term.first == candidate.first else {
+            return false
+        }
+
+        let distance = editDistance(term, candidate, maximumDistance: 2)
+        return distance <= 2
+    }
+
+    private static func editDistance(_ left: String, _ right: String, maximumDistance: Int) -> Int {
+        let leftCharacters = Array(left)
+        let rightCharacters = Array(right)
+
+        if abs(leftCharacters.count - rightCharacters.count) > maximumDistance {
+            return maximumDistance + 1
+        }
+
+        var previousRow = Array(0...rightCharacters.count)
+
+        for (leftIndex, leftCharacter) in leftCharacters.enumerated() {
+            var currentRow = [leftIndex + 1]
+            var bestInRow = currentRow[0]
+
+            for (rightIndex, rightCharacter) in rightCharacters.enumerated() {
+                let insertion = currentRow[rightIndex] + 1
+                let deletion = previousRow[rightIndex + 1] + 1
+                let substitution = previousRow[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
+                let value = min(insertion, deletion, substitution)
+                currentRow.append(value)
+                bestInRow = min(bestInRow, value)
+            }
+
+            if bestInRow > maximumDistance {
+                return maximumDistance + 1
+            }
+
+            previousRow = currentRow
+        }
+
+        return previousRow.last ?? maximumDistance + 1
     }
 
     private static func relevanceScore(

@@ -427,3 +427,5 @@
 "Grant Shodana access to %@ or one of its parent folders." = "Grant Shodana access to %@ or one of its parent folders.";
 "Allow Access" = "Allow Access";
 "Selected folder does not grant access to %@." = "Selected folder does not grant access to %@.";
+"Open File Failed" = "Open File Failed";
+"No external application is available for this file. Change the file's default application in Finder." = "No external application is available for this file. Change the file's default application in Finder.";

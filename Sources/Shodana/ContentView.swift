@@ -1698,33 +1698,51 @@ struct AIContextFileRow: View {
 struct AIChatMessageBubble: View {
     let message: AIChatMessage
 
+    private var isUserMessage: Bool {
+        message.role == .user
+    }
+
     var body: some View {
-        HStack(alignment: .top) {
-            if message.role == .user {
-                Spacer(minLength: 40)
+        HStack(alignment: .top, spacing: 0) {
+            if isUserMessage {
+                Spacer(minLength: 120)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(L10n.string(message.role.titleKey))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            bubble
+                .frame(
+                    maxWidth: isUserMessage ? 520 : .infinity,
+                    alignment: .leading
+                )
 
-                Text(message.content)
-                    .textSelection(.enabled)
-                    .font(.system(size: 13))
-            }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(message.role == .user ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor))
-            )
-            .frame(maxWidth: 680, alignment: .leading)
-
-            if message.role != .user {
-                Spacer(minLength: 40)
+            if !isUserMessage {
+                Spacer(minLength: 96)
             }
         }
-        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: isUserMessage ? .trailing : .leading)
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L10n.string(message.role.titleKey))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(message.content)
+                .textSelection(.enabled)
+                .font(.system(size: 13))
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isUserMessage ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(
+                    isUserMessage ? Color.accentColor.opacity(0.12) : Color(nsColor: .separatorColor).opacity(0.45),
+                    lineWidth: 1
+                )
+        )
     }
 }
 
