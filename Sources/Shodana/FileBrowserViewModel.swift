@@ -883,6 +883,7 @@ final class FileBrowserViewModel: ObservableObject {
         isAIThinking = true
         aiContextSummary = L10n.string("Preparing AI context...")
         aiChatMessages.append(AIChatMessage(role: .user, content: question))
+        searchText = ""
 
         aiSearchTask = Task { [weak self, settings, apiKey, question, contextSearchQuestion, scopeURLs, previousMessages] in
             do {

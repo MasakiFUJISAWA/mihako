@@ -320,7 +320,7 @@ enum AISearchContextBuilder {
                     let pathScore = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
 
                     if pathScore > 0 {
-                        matchingPathCandidates.append((relativePath, pathScore))
+                        matchingPathCandidates.append((pathIndexLine(for: url, relativePath: relativePath), pathScore))
                     }
 
                     if isIgnored(relativePath: relativePath, name: url.lastPathComponent, patterns: patterns) {
@@ -479,6 +479,10 @@ enum AISearchContextBuilder {
         }
 
         return left.score > right.score
+    }
+
+    private static func pathIndexLine(for url: URL, relativePath: String) -> String {
+        "\(url.path) (relative: \(relativePath))"
     }
 
     private static func searchTerms(from question: String) -> [String] {
@@ -863,11 +867,12 @@ enum AISearchPromptBuilder {
         settings: AISearchSettings
     ) -> [AIChatClient.ChatMessage] {
         let systemPrompt = """
-        You are Shodana's AI search assistant. Answer using only the file context explicitly provided by Shodana. If the context is insufficient, say what is missing and suggest which files or folders should be added to the AI scope. Prefer concise, actionable engineering guidance.
+        You are Shodana's AI search assistant. Answer using only the file context explicitly provided by Shodana. If the user asks where a file or code is located, answer with the exact full path shown in the context. Never invent placeholder paths such as /path/to/your/project, /your/project, or <project-root>. If the exact full path is not present in the context, say that the full path is not available. Ignore placeholder paths that may appear in earlier assistant messages. Prefer concise, actionable engineering guidance.
         """
         let context = contextText(from: contextResult, limit: settings.normalized.maxContextCharacters)
         let recentHistory = previousMessages
-            .suffix(6)
+            .suffix(8)
+            .filter { $0.role == .user }
             .map {
                 AIChatClient.ChatMessage(
                     role: $0.role.rawValue,
@@ -921,6 +926,8 @@ enum AISearchPromptBuilder {
             let header = """
 
             --- FILE: \(file.relativePath)
+            Full path: \(file.url.path)
+            Root path: \(file.rootURL.path)
             Size: \(file.size) bytes
             Match: \(file.matchSummary)
             ---
