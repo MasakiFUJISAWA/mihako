@@ -423,3 +423,7 @@
 "AI Search failed: %@" = "AI検索に失敗しました: %@";
 "AI Search failed." = "AI検索に失敗しました。";
 "AI context: %d files selected, %d scanned, %d skipped" = "AIコンテキスト: %d件選択、%d件スキャン、%d件スキップ";
+"Folder Access Required" = "フォルダへのアクセス許可が必要です";
+"Grant Shodana access to %@ or one of its parent folders." = "%@ またはその親フォルダへのアクセスをShodanaに許可してください。";
+"Allow Access" = "アクセスを許可";
+"Selected folder does not grant access to %@." = "選択したフォルダでは %@ へのアクセスを許可できません。";

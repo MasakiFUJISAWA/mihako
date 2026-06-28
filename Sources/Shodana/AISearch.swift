@@ -323,25 +323,97 @@ enum AISearchContextBuilder {
                         continue
                     }
 
+                    if isDirectory {
+                        let score = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
+                        if score > 0 {
+                            candidates.append(
+                                AIContextFile(
+                                    url: url,
+                                    rootURL: rootURL,
+                                    relativePath: relativePath,
+                                    snippet: pathOnlySnippet(
+                                        relativePath: relativePath,
+                                        kind: "Directory",
+                                        size: nil,
+                                        modifiedAt: values?.contentModificationDate
+                                    ),
+                                    matchSummary: "matched path",
+                                    size: 0,
+                                    modifiedAt: values?.contentModificationDate,
+                                    score: score
+                                )
+                            )
+                        }
+
+                        continue
+                    }
+
                     guard values?.isRegularFile == true else {
                         continue
                     }
 
                     scannedFileCount += 1
 
+                    let pathScore = pathRelevanceScore(relativePath: relativePath, queryTerms: queryTerms)
+
                     guard isLikelyTextFile(url),
                           let size = values?.fileSize,
                           size <= normalizedSettings.maxFileBytes else {
+                        if pathScore > 0 {
+                            candidates.append(
+                                AIContextFile(
+                                    url: url,
+                                    rootURL: rootURL,
+                                    relativePath: relativePath,
+                                    snippet: pathOnlySnippet(
+                                        relativePath: relativePath,
+                                        kind: "File",
+                                        size: values?.fileSize,
+                                        modifiedAt: values?.contentModificationDate
+                                    ),
+                                    matchSummary: "matched path; content not included",
+                                    size: values?.fileSize ?? 0,
+                                    modifiedAt: values?.contentModificationDate,
+                                    score: pathScore
+                                )
+                            )
+                        }
+
                         skippedFileCount += 1
                         continue
                     }
 
                     guard let text = readTextPrefix(from: url, maxBytes: normalizedSettings.maxFileBytes) else {
+                        if pathScore > 0 {
+                            candidates.append(
+                                AIContextFile(
+                                    url: url,
+                                    rootURL: rootURL,
+                                    relativePath: relativePath,
+                                    snippet: pathOnlySnippet(
+                                        relativePath: relativePath,
+                                        kind: "File",
+                                        size: size,
+                                        modifiedAt: values?.contentModificationDate
+                                    ),
+                                    matchSummary: "matched path; content not readable",
+                                    size: size,
+                                    modifiedAt: values?.contentModificationDate,
+                                    score: pathScore
+                                )
+                            )
+                        }
+
                         skippedFileCount += 1
                         continue
                     }
 
-                    let score = relevanceScore(relativePath: relativePath, text: text, queryTerms: queryTerms)
+                    let score = relevanceScore(
+                        relativePath: relativePath,
+                        text: text,
+                        queryTerms: queryTerms,
+                        pathScore: pathScore
+                    )
                     guard score > 0 || candidates.count < normalizedSettings.maxFiles / 2 else {
                         continue
                     }
@@ -386,16 +458,17 @@ enum AISearchContextBuilder {
     }
 
     private static func searchTerms(from question: String) -> [String] {
-        let separators = CharacterSet.alphanumerics
-            .union(CharacterSet(charactersIn: "_-./"))
-            .inverted
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
         let terms = question
             .components(separatedBy: separators)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { $0.count >= 2 }
 
         if !terms.isEmpty {
-            return Array(Set(terms))
+            var seen = Set<String>()
+            return terms.filter { seen.insert($0).inserted }
         }
 
         let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -463,26 +536,66 @@ enum AISearchContextBuilder {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func relevanceScore(relativePath: String, text: String, queryTerms: [String]) -> Int {
+    private static func pathRelevanceScore(relativePath: String, queryTerms: [String]) -> Int {
         guard !queryTerms.isEmpty else {
             return 1
         }
 
         let lowercasedPath = relativePath.lowercased()
-        let lowercasedText = text.lowercased()
         var score = 0
 
         for term in queryTerms {
             if lowercasedPath.contains(term) {
                 score += 12
             }
+        }
 
+        return score
+    }
+
+    private static func relevanceScore(
+        relativePath: String,
+        text: String,
+        queryTerms: [String],
+        pathScore: Int
+    ) -> Int {
+        guard !queryTerms.isEmpty else {
+            return 1
+        }
+
+        let lowercasedText = text.lowercased()
+        var score = pathScore
+
+        for term in queryTerms {
             if lowercasedText.contains(term) {
                 score += 4
             }
         }
 
         return score
+    }
+
+    private static func pathOnlySnippet(
+        relativePath: String,
+        kind: String,
+        size: Int?,
+        modifiedAt: Date?
+    ) -> String {
+        var lines = [
+            "Path: \(relativePath)",
+            "Kind: \(kind)"
+        ]
+
+        if let size {
+            lines.append("Size: \(size) bytes")
+        }
+
+        if let modifiedAt {
+            lines.append("Modified: \(modifiedAt.formatted(date: .numeric, time: .standard))")
+        }
+
+        lines.append("Content was not included; this entry is provided so the AI can answer file location questions.")
+        return lines.joined(separator: "\n")
     }
 
     private static func snippet(from text: String, queryTerms: [String]) -> String {

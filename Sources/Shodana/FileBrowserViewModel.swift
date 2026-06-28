@@ -109,6 +109,7 @@ final class FileBrowserViewModel: ObservableObject {
     private var cloudStatusMonitorTask: Task<Void, Never>?
     private var cloudStatusOverrides: [URL: CloudFileStatus] = [:]
     private var cloudStatusOverrideDates: [URL: Date] = [:]
+    private var securityScopedFolderAccessURLs: [URL] = []
 
     private enum TerminalApp {
         case terminal
@@ -167,6 +168,7 @@ final class FileBrowserViewModel: ObservableObject {
         gitRemoteTrackingTask?.cancel()
         gitStatusTask?.cancel()
         cloudStatusMonitorTask?.cancel()
+        securityScopedFolderAccessURLs.forEach { $0.stopAccessingSecurityScopedResource() }
     }
 
     var canGoBack: Bool {
@@ -603,6 +605,12 @@ final class FileBrowserViewModel: ObservableObject {
             selectionAnchorURL = nil
             selectionFocusURL = nil
             restartCloudStatusMonitor()
+
+            if isPermissionDenied(error) {
+                requestFolderAccessAndReload(currentURL, originalError: error)
+                return
+            }
+
             presentError(error, action: "Read folder")
         }
     }
@@ -5334,6 +5342,67 @@ final class FileBrowserViewModel: ObservableObject {
 
             return (status, mountURLs)
         }.value
+    }
+
+    private func requestFolderAccessAndReload(_ url: URL, originalError: Error) {
+        let targetURL = url.standardizedFileURL
+        let panel = NSOpenPanel()
+        panel.title = L10n.string("Folder Access Required")
+        panel.message = String(format: L10n.string("Grant Shodana access to %@ or one of its parent folders."), targetURL.path)
+        panel.prompt = L10n.string("Allow Access")
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = targetURL.deletingLastPathComponent()
+
+        guard panel.runModal() == .OK,
+              let selectedURL = panel.url?.standardizedFileURL else {
+            presentError(originalError, action: "Read folder")
+            return
+        }
+
+        let selectedPath = selectedURL.path.trimmingTrailingSlash
+        let targetPath = targetURL.path.trimmingTrailingSlash
+
+        guard Self.path(targetPath, isInsideOrEqualTo: selectedPath) else {
+            presentMessage(
+                String(
+                    format: L10n.string("Selected folder does not grant access to %@."),
+                    targetURL.path
+                )
+            )
+            return
+        }
+
+        if selectedURL.startAccessingSecurityScopedResource(),
+           !securityScopedFolderAccessURLs.contains(selectedURL) {
+            securityScopedFolderAccessURLs.append(selectedURL)
+        }
+
+        reload()
+    }
+
+    private func isPermissionDenied(_ error: Error) -> Bool {
+        isPermissionDenied(error as NSError)
+    }
+
+    private func isPermissionDenied(_ error: NSError) -> Bool {
+        if error.domain == NSCocoaErrorDomain,
+           error.code == NSFileReadNoPermissionError {
+            return true
+        }
+
+        if error.domain == NSPOSIXErrorDomain,
+           error.code == Int(EACCES) || error.code == Int(EPERM) {
+            return true
+        }
+
+        if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isPermissionDenied(underlyingError)
+        }
+
+        return false
     }
 
     private func presentError(_ error: Error, action: String) {
